@@ -6,6 +6,7 @@ import {
   truncate,
   type LoadedFile,
 } from './context.js';
+import { gatherRelatedFiles } from './related.js';
 import { selectDimensionsHeuristic, sanitizeDimensions } from './router.js';
 import { ALL_DIMENSION_IDS, DIMENSIONS, type DimensionId } from './dimensions.js';
 import { withRetry } from './retry.js';
@@ -18,6 +19,8 @@ import { ReviewResultSchema, reviewResultJsonSchema, type ReviewResult } from '.
 const DIFF_CHAR_CAP = 60_000;
 const FILES_CHAR_BUDGET = 40_000;
 const MAX_FILES_TO_READ = 40;
+/** Budget (chars) for the untouched related files pulled by the planner. */
+const RELATED_CHAR_BUDGET = 30_000;
 const ROUTING_MATERIAL_CAP = 8_000;
 /** Total tries for the generate-then-validate step (re-generate on bad output). */
 const GENERATE_ATTEMPTS = 2;
@@ -40,6 +43,9 @@ export interface ReviewOutcome {
   result: ReviewResult;
   /** Which rubric dimensions were sent (for observability / token transparency). */
   dimensions: DimensionId[];
+  /** Untouched related files the planner pulled for architecture-level context
+   * (for observability — demonstrates the agentic-reading lever working). */
+  relatedFiles: string[];
 }
 
 /**
@@ -58,6 +64,16 @@ export async function review(deps: ReviewDeps, prompts: PromptTexts): Promise<Re
     if (content !== null) loaded.push({ path, content });
   }
   const filesBlock = assembleFilesBlock(loaded, FILES_CHAR_BUDGET);
+  const cappedDiff = truncate(diff, DIFF_CHAR_CAP).text;
+
+  // Agentic related-code reading: let the model name the untouched files it needs
+  // (struct defs, lock-holding callers) and pull them into the review context.
+  const related = await gatherRelatedFiles(deps.llm, (path) => deps.pr.readFile(path), {
+    diff: cappedDiff,
+    changedFiles,
+    loaded,
+  });
+  const relatedBlock = assembleFilesBlock(related, RELATED_CHAR_BUDGET);
 
   const dimensions = await selectDimensions(deps.llm, diff, changedFiles, loaded);
   const rubricFragments = dimensions.map((id) => prompts.rubric[id]);
@@ -68,9 +84,11 @@ export async function review(deps: ReviewDeps, prompts: PromptTexts): Promise<Re
   const system = assembleSystemPrompt(prompts.systemPrompt, rubricFragments, examples);
   const user = assembleUserPrompt(
     deps.pr.metadata,
-    truncate(diff, DIFF_CHAR_CAP).text,
+    cappedDiff,
     filesBlock.text,
+    relatedBlock.text,
   );
+  const relatedFiles = related.map((f) => f.path);
 
   // The client returns the model's output unvalidated; the core owns the
   // validation boundary so the result is typed without `any`. Retry the whole
@@ -87,7 +105,7 @@ export async function review(deps: ReviewDeps, prompts: PromptTexts): Promise<Re
       });
       return ReviewResultSchema.parse(lastRaw);
     }, GENERATE_ATTEMPTS);
-    return { result, dimensions };
+    return { result, dimensions, relatedFiles };
   } catch (error) {
     if (error instanceof ZodError) throw new InvalidModelOutputError(lastRaw);
     throw error;

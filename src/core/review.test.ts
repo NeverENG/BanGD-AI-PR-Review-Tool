@@ -4,6 +4,7 @@ import type { LlmClient, LlmRequest, PrContext } from './ports.js';
 import type { PromptTexts } from './prompt.js';
 import { ALL_DIMENSION_IDS, type DimensionId } from './dimensions.js';
 import { InvalidModelOutputError } from './errors.js';
+import { RELATED_PLAN_SCHEMA } from './related.js';
 import { reviewResultJsonSchema, FindingSchema, ReviewResultSchema } from './schema.js';
 
 const prompts: PromptTexts = {
@@ -51,10 +52,18 @@ const validResult = {
   ],
 };
 
-function fakeLlm(output: unknown, capture?: (r: LlmRequest) => void): LlmClient {
+// Schema-aware fake: the related-files planner runs first (it calls with
+// RELATED_PLAN_SCHEMA); by default it returns "no related files" so these tests
+// exercise the review path. `output` answers the review (and LLM-router) call.
+function fakeLlm(
+  output: unknown,
+  capture?: (r: LlmRequest) => void,
+  relatedPaths: string[] = [],
+): LlmClient {
   return {
     generateStructured: (request: LlmRequest) => {
       capture?.(request);
+      if (request.outputSchema === RELATED_PLAN_SCHEMA) return Promise.resolve({ paths: relatedPaths });
       return Promise.resolve(output);
     },
   };
@@ -63,12 +72,13 @@ function fakeLlm(output: unknown, capture?: (r: LlmRequest) => void): LlmClient 
 describe('review (core orchestrator)', () => {
   it('returns a validated ReviewResult from the model output', async () => {
     const deps: ReviewDeps = { llm: fakeLlm(validResult), pr: fakePr() };
-    const { result, dimensions } = await review(deps, prompts);
+    const { result, dimensions, relatedFiles } = await review(deps, prompts);
     expect(result.findings).toHaveLength(1);
     expect(result.findings[0]?.type).toBe('并发');
     expect(result.changeSummary).toContain('命中计数');
     expect(result.overallRisk).toBe('高');
     expect(dimensions).toContain('concurrency');
+    expect(relatedFiles).toEqual([]);
   });
 
   it('sends only the selected dimension rubric + matching example', async () => {
@@ -122,7 +132,8 @@ describe('review (core orchestrator)', () => {
     const bad = { summary: 'x', findings: [{ file: 'a.go', severity: 'urgent' }] };
     let calls = 0;
     const llm: LlmClient = {
-      generateStructured: () => {
+      generateStructured: (request: LlmRequest) => {
+        if (request.outputSchema === RELATED_PLAN_SCHEMA) return Promise.resolve({ paths: [] });
         calls++;
         return Promise.resolve(calls === 1 ? bad : validResult);
       },
@@ -130,6 +141,26 @@ describe('review (core orchestrator)', () => {
     const { result } = await review({ llm, pr: fakePr() }, prompts);
     expect(calls).toBe(2);
     expect(result.overallRisk).toBe('高');
+  });
+
+  it('pulls planner-named related files and includes them in the prompt', async () => {
+    let seen: LlmRequest | undefined;
+    const readFile = vi.fn((path: string) => {
+      if (path === 'cache/block.go') return Promise.resolve('package cache\n// FULL FILE BODY');
+      if (path === 'cache/block_def.go') return Promise.resolve('package cache\ntype Block struct{ data []byte }');
+      return Promise.resolve(null);
+    });
+    const deps: ReviewDeps = {
+      // Planner asks for two paths; one exists, one is a miss (null, dropped).
+      llm: fakeLlm(validResult, (r) => (seen = r), ['cache/block_def.go', 'cache/missing.go']),
+      pr: fakePr({ readFile }),
+    };
+    const { relatedFiles } = await review(deps, prompts);
+
+    expect(readFile).toHaveBeenCalledWith('cache/block_def.go');
+    expect(relatedFiles).toEqual(['cache/block_def.go']);
+    expect(seen?.user).toContain('周边相关代码');
+    expect(seen?.user).toContain('type Block struct');
   });
 
   it('throws InvalidModelOutputError (carrying raw) when every generation is invalid', async () => {

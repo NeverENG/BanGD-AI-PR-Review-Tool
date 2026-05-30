@@ -35733,7 +35733,7 @@ function assembleSystemPrompt(systemPrompt, rubricFragments, examples) {
     }
     return parts.join('\n\n---\n\n');
 }
-function assembleUserPrompt(metadata, diff, filesText) {
+function assembleUserPrompt(metadata, diff, filesText, relatedText = '') {
     const sections = [
         `# 待评审的 PR`,
         `标题：${metadata.title}`,
@@ -35745,6 +35745,9 @@ function assembleUserPrompt(metadata, diff, filesText) {
     ];
     if (filesText) {
         sections.push(`# 被改动文件的完整内容（用于理解 diff 之外的上下文）`, filesText);
+    }
+    if (relatedText) {
+        sections.push(`# 周边相关代码（未被改动，按需拉取，用于架构级推理）`, relatedText);
     }
     sections.push(`请按系统提示词中的输出格式产出：1) PR 变更总结（changeSummary）；2) 整体风险等级（overallRisk）；3) 逐条风险识别与 Review 建议（findings）。`);
     return sections.join('\n\n');
@@ -35810,6 +35813,104 @@ function partitionGroups(groups, existingKeys) {
 
 /***/ }),
 
+/***/ 5640:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.MAX_RELATED_FILES = exports.RELATED_PLAN_SCHEMA = void 0;
+exports.planRelatedFiles = planRelatedFiles;
+exports.gatherRelatedFiles = gatherRelatedFiles;
+const context_js_1 = __nccwpck_require__(8480);
+/** JSON Schema for the planner's structured output: a list of file paths. */
+exports.RELATED_PLAN_SCHEMA = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['paths'],
+    properties: {
+        paths: { type: 'array', items: { type: 'string' } },
+    },
+};
+/** Hard cap on how many related files one round may fetch. */
+exports.MAX_RELATED_FILES = 8;
+/** Cap on the changed-file material handed to the planner (chars). */
+const PLAN_MATERIAL_CAP = 24_000;
+const PLANNER_SYSTEM = [
+    '你是一个资深数据库内核工程师的"上下文规划助手"。',
+    '下面给你一个 PR 的 diff 和被改动文件的完整内容。',
+    '请判断：要在架构层面（并发/所有权/锁/内存生命周期/存储/schema 等）正确评审这个改动，',
+    '还需要阅读哪些**未被改动**的周边源码文件——例如：',
+    '- 被引用的 struct / interface / 常量的定义所在文件；',
+    '- 持有同一把锁、或操作同一数据结构的调用方 / 被调用方；',
+    '- 同一 package 内承载相同不变量的其它文件。',
+    '只能依据改动代码里**已经出现**的 import 路径与标识符来推断文件路径（Go 惯例：包路径≈目录，类型名≈文件名）。',
+    '规则：只返回未被改动、且确有助于评审的文件路径；不要返回已给出的被改动文件；不要臆造无依据的路径；',
+    `最多返回 ${exports.MAX_RELATED_FILES} 个；若改动是自包含的、无需额外上下文，返回空数组。`,
+].join('\n');
+/**
+ * Ask the model which untouched related files it needs. Returns candidate paths,
+ * de-duplicated, with the already-changed files removed, capped to MAX_RELATED_FILES.
+ * Never throws: on any planner failure it returns [] (the review proceeds without
+ * related context rather than failing).
+ */
+async function planRelatedFiles(llm, input) {
+    const changedSet = new Set(input.changedFiles);
+    const material = input.loaded
+        .map((f) => `### ${f.path}\n${f.content}`)
+        .join('\n\n');
+    const user = [
+        '# Diff',
+        '```diff',
+        input.diff,
+        '```',
+        '# 被改动文件的完整内容',
+        (0, context_js_1.truncate)(material, PLAN_MATERIAL_CAP).text,
+        '请返回需要补充阅读的未改动文件路径（paths）。',
+    ].join('\n\n');
+    let raw;
+    try {
+        raw = await llm.generateStructured({ system: PLANNER_SYSTEM, user, outputSchema: exports.RELATED_PLAN_SCHEMA });
+    }
+    catch {
+        return [];
+    }
+    const paths = raw.paths;
+    if (!Array.isArray(paths))
+        return [];
+    const seen = new Set();
+    const result = [];
+    for (const p of paths) {
+        if (typeof p !== 'string')
+            continue;
+        const path = p.trim().replace(/^[ab]\//, '');
+        if (!path || changedSet.has(path) || seen.has(path))
+            continue;
+        seen.add(path);
+        result.push(path);
+        if (result.length >= exports.MAX_RELATED_FILES)
+            break;
+    }
+    return result;
+}
+/**
+ * One planning round end-to-end: plan the related paths, then fetch each via
+ * `readFile`, dropping misses (null). Returns the successfully read files (each
+ * with its content) for inclusion in the review context.
+ */
+async function gatherRelatedFiles(llm, readFile, input) {
+    const paths = await planRelatedFiles(llm, input);
+    const loaded = [];
+    for (const path of paths) {
+        const content = await readFile(path);
+        if (content !== null)
+            loaded.push({ path, content });
+    }
+    return loaded;
+}
+
+
+/***/ }),
+
 /***/ 7253:
 /***/ ((__unused_webpack_module, exports) => {
 
@@ -35849,6 +35950,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.review = review;
 const prompt_js_1 = __nccwpck_require__(5301);
 const context_js_1 = __nccwpck_require__(8480);
+const related_js_1 = __nccwpck_require__(5640);
 const router_js_1 = __nccwpck_require__(2086);
 const dimensions_js_1 = __nccwpck_require__(8094);
 const retry_js_1 = __nccwpck_require__(7253);
@@ -35860,6 +35962,8 @@ const schema_js_1 = __nccwpck_require__(2032);
 const DIFF_CHAR_CAP = 60_000;
 const FILES_CHAR_BUDGET = 40_000;
 const MAX_FILES_TO_READ = 40;
+/** Budget (chars) for the untouched related files pulled by the planner. */
+const RELATED_CHAR_BUDGET = 30_000;
 const ROUTING_MATERIAL_CAP = 8_000;
 /** Total tries for the generate-then-validate step (re-generate on bad output). */
 const GENERATE_ATTEMPTS = 2;
@@ -35887,13 +35991,23 @@ async function review(deps, prompts) {
             loaded.push({ path, content });
     }
     const filesBlock = (0, context_js_1.assembleFilesBlock)(loaded, FILES_CHAR_BUDGET);
+    const cappedDiff = (0, context_js_1.truncate)(diff, DIFF_CHAR_CAP).text;
+    // Agentic related-code reading: let the model name the untouched files it needs
+    // (struct defs, lock-holding callers) and pull them into the review context.
+    const related = await (0, related_js_1.gatherRelatedFiles)(deps.llm, (path) => deps.pr.readFile(path), {
+        diff: cappedDiff,
+        changedFiles,
+        loaded,
+    });
+    const relatedBlock = (0, context_js_1.assembleFilesBlock)(related, RELATED_CHAR_BUDGET);
     const dimensions = await selectDimensions(deps.llm, diff, changedFiles, loaded);
     const rubricFragments = dimensions.map((id) => prompts.rubric[id]);
     const examples = dimensions
         .map((id) => prompts.examples[id])
         .filter((ex) => ex !== undefined);
     const system = (0, prompt_js_1.assembleSystemPrompt)(prompts.systemPrompt, rubricFragments, examples);
-    const user = (0, prompt_js_1.assembleUserPrompt)(deps.pr.metadata, (0, context_js_1.truncate)(diff, DIFF_CHAR_CAP).text, filesBlock.text);
+    const user = (0, prompt_js_1.assembleUserPrompt)(deps.pr.metadata, cappedDiff, filesBlock.text, relatedBlock.text);
+    const relatedFiles = related.map((f) => f.path);
     // The client returns the model's output unvalidated; the core owns the
     // validation boundary so the result is typed without `any`. Retry the whole
     // generate-then-validate step so a single malformed generation isn't fatal.
@@ -35909,7 +36023,7 @@ async function review(deps, prompts) {
             });
             return schema_js_1.ReviewResultSchema.parse(lastRaw);
         }, GENERATE_ATTEMPTS);
-        return { result, dimensions };
+        return { result, dimensions, relatedFiles };
     }
     catch (error) {
         if (error instanceof zod_1.ZodError)
@@ -36237,13 +36351,15 @@ async function run() {
         }
         throw error;
     }
-    const { result, dimensions } = reviewed;
+    const { result, dimensions, relatedFiles } = reviewed;
     const usage = llm.usage;
-    const footer = `本次评审消耗 token：${(0, usage_js_1.formatUsage)(usage)}｜维度 [${dimensions.join(', ')}]`;
+    const relatedNote = relatedFiles.length > 0 ? `｜补充阅读周边文件 [${relatedFiles.join(', ')}]` : '';
+    const footer = `本次评审消耗 token：${(0, usage_js_1.formatUsage)(usage)}｜维度 [${dimensions.join(', ')}]${relatedNote}`;
     const published = await (0, publish_js_1.publishReview)(publisher, result, pr.number, footer);
     core.setOutput('finding_count', result.findings.length);
     core.setOutput('total_tokens', (0, usage_js_1.totalTokens)(usage));
     core.info(`BanGD 评审完成，维度=[${dimensions.join(', ')}]，共 ${result.findings.length} 条 finding；` +
+        `补充阅读周边文件 ${relatedFiles.length} 个${relatedFiles.length > 0 ? ` [${relatedFiles.join(', ')}]` : ''}；` +
         `新建 Issue ${published.created} 个，复用 ${published.reused} 个${published.degraded ? '（部分降级为内联）' : ''}。`);
     core.info(`Token 用量：${(0, usage_js_1.formatUsage)(usage)}`);
     await core.summary
