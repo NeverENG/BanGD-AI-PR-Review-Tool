@@ -51,7 +51,11 @@ export interface CommentItem {
 }
 
 /** The single, consolidated PR comment (architecture-level, not per-line). */
-export function formatSummaryComment(result: ReviewResult, items: CommentItem[]): string {
+export function formatSummaryComment(
+  result: ReviewResult,
+  items: CommentItem[],
+  footer?: string,
+): string {
   const head = [
     SUMMARY_MARKER,
     '## 🐯 BanGD 数据库内核评审',
@@ -60,8 +64,10 @@ export function formatSummaryComment(result: ReviewResult, items: CommentItem[])
     `> 本评审不阻塞合入；架构级建议以 Issue 形式跟踪。`,
   ].join('\n\n');
 
+  const foot = footer ? `\n\n---\n\n<sub>${footer}</sub>` : '';
+
   if (items.length === 0) {
-    return `${head}\n\n未发现需要从架构层面改进的问题。`;
+    return `${head}\n\n未发现需要从架构层面改进的问题。${foot}`;
   }
 
   const list = items
@@ -75,5 +81,5 @@ export function formatSummaryComment(result: ReviewResult, items: CommentItem[])
     })
     .join('\n');
 
-  return `${head}\n\n### 架构问题（共 ${items.length} 项）\n\n${list}`;
+  return `${head}\n\n### 架构问题（共 ${items.length} 项）\n\n${list}${foot}`;
 }
