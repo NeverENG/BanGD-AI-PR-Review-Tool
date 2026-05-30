@@ -35671,6 +35671,46 @@ exports.ALL_DIMENSION_IDS = exports.DIMENSIONS.map((d) => d.id);
 
 /***/ }),
 
+/***/ 4296:
+/***/ ((__unused_webpack_module, exports) => {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.InvalidModelOutputError = void 0;
+exports.rawSnippet = rawSnippet;
+/**
+ * Raised when the model's output can't be validated into a ReviewResult even
+ * after retries. Carries the raw output so the shell can log it (for diagnosis)
+ * and degrade gracefully instead of crashing the run.
+ */
+class InvalidModelOutputError extends Error {
+    raw;
+    constructor(raw) {
+        super('模型未返回可解析的结构化评审结果');
+        this.name = 'InvalidModelOutputError';
+        this.raw = raw;
+    }
+}
+exports.InvalidModelOutputError = InvalidModelOutputError;
+/** A bounded, log-safe string view of an arbitrary raw value. */
+function rawSnippet(raw, max = 800) {
+    let s;
+    if (typeof raw === 'string')
+        s = raw;
+    else {
+        try {
+            s = JSON.stringify(raw) ?? String(raw);
+        }
+        catch {
+            s = String(raw);
+        }
+    }
+    return s.length > max ? `${s.slice(0, max)}…(已截断)` : s;
+}
+
+
+/***/ }),
+
 /***/ 5301:
 /***/ ((__unused_webpack_module, exports) => {
 
@@ -35812,6 +35852,8 @@ const context_js_1 = __nccwpck_require__(8480);
 const router_js_1 = __nccwpck_require__(2086);
 const dimensions_js_1 = __nccwpck_require__(8094);
 const retry_js_1 = __nccwpck_require__(7253);
+const errors_js_1 = __nccwpck_require__(4296);
+const zod_1 = __nccwpck_require__(924);
 const schema_js_1 = __nccwpck_require__(2032);
 /** Context budgets (chars). The diff is the primary signal and is kept (capped);
  * changed-file contents fill the remaining budget. ~chars/3-4 ≈ tokens. */
@@ -35855,15 +35897,25 @@ async function review(deps, prompts) {
     // The client returns the model's output unvalidated; the core owns the
     // validation boundary so the result is typed without `any`. Retry the whole
     // generate-then-validate step so a single malformed generation isn't fatal.
-    const result = await (0, retry_js_1.withRetry)(async () => {
-        const raw = await deps.llm.generateStructured({
-            system,
-            user,
-            outputSchema: schema_js_1.reviewResultJsonSchema,
-        });
-        return schema_js_1.ReviewResultSchema.parse(raw);
-    }, GENERATE_ATTEMPTS);
-    return { result, dimensions };
+    // If every attempt yields unparseable output, surface InvalidModelOutputError
+    // carrying the raw output so the shell can log it and degrade gracefully.
+    let lastRaw;
+    try {
+        const result = await (0, retry_js_1.withRetry)(async () => {
+            lastRaw = await deps.llm.generateStructured({
+                system,
+                user,
+                outputSchema: schema_js_1.reviewResultJsonSchema,
+            });
+            return schema_js_1.ReviewResultSchema.parse(lastRaw);
+        }, GENERATE_ATTEMPTS);
+        return { result, dimensions };
+    }
+    catch (error) {
+        if (error instanceof zod_1.ZodError)
+            throw new errors_js_1.InvalidModelOutputError(lastRaw);
+        throw error;
+    }
 }
 /**
  * Pick the rubric dimensions to send: heuristic first; if it matches nothing,
@@ -36130,7 +36182,9 @@ const github_js_1 = __nccwpck_require__(4799);
 const llm_js_1 = __nccwpck_require__(5653);
 const prompts_js_1 = __nccwpck_require__(5989);
 const publish_js_1 = __nccwpck_require__(1101);
+const format_js_1 = __nccwpck_require__(6951);
 const usage_js_1 = __nccwpck_require__(4528);
+const errors_js_1 = __nccwpck_require__(4296);
 function readString(obj, key) {
     const value = obj[key];
     return typeof value === 'string' ? value : '';
@@ -36165,10 +36219,27 @@ async function run() {
         ...(model ? { model } : {}),
         ...(baseUrl ? { baseURL: baseUrl } : {}),
     });
-    const { result, dimensions } = await (0, review_js_1.review)({ llm, pr: prContext }, prompts);
+    const publisher = new github_js_1.GithubPublisher(octokit, { owner, repo, pullNumber: pr.number });
+    let reviewed;
+    try {
+        reviewed = await (0, review_js_1.review)({ llm, pr: prContext }, prompts);
+    }
+    catch (error) {
+        if (error instanceof errors_js_1.InvalidModelOutputError) {
+            // Non-blocking: post a degraded comment + log the raw output for diagnosis
+            // instead of failing the run.
+            const snippet = (0, errors_js_1.rawSnippet)(error.raw);
+            core.warning(`模型未返回有效结构化评审，已降级。Token：${(0, usage_js_1.formatUsage)(llm.usage)}。原始片段：${snippet}`);
+            await publisher.upsertSummaryComment((0, format_js_1.formatDegradedComment)(snippet));
+            core.setOutput('finding_count', 0);
+            core.setOutput('total_tokens', (0, usage_js_1.totalTokens)(llm.usage));
+            return;
+        }
+        throw error;
+    }
+    const { result, dimensions } = reviewed;
     const usage = llm.usage;
     const footer = `本次评审消耗 token：${(0, usage_js_1.formatUsage)(usage)}｜维度 [${dimensions.join(', ')}]`;
-    const publisher = new github_js_1.GithubPublisher(octokit, { owner, repo, pullNumber: pr.number });
     const published = await (0, publish_js_1.publishReview)(publisher, result, pr.number, footer);
     core.setOutput('finding_count', result.findings.length);
     core.setOutput('total_tokens', (0, usage_js_1.totalTokens)(usage));
@@ -36196,6 +36267,7 @@ run().catch((error) => {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.formatIssueTitle = formatIssueTitle;
 exports.formatIssueBody = formatIssueBody;
+exports.formatDegradedComment = formatDegradedComment;
 exports.formatSummaryComment = formatSummaryComment;
 const markers_js_1 = __nccwpck_require__(3457);
 const SEVERITY_EMOJI = {
@@ -36233,6 +36305,20 @@ function formatIssueBody(group, prNumber) {
         (0, markers_js_1.issueKeyMarker)(group.fullKey),
         `> 来自 #${prNumber} 的架构级评审建议。**不阻塞合入**，仅供参考是否有更好的架构解法。`,
         body,
+    ].join('\n\n');
+}
+/**
+ * Comment used when the model failed to produce a valid structured review.
+ * Non-blocking: tells the author it can be retried / use a stronger model, and
+ * includes the raw output snippet for debugging. Carries the summary marker so
+ * it upserts the single comment like a normal review.
+ */
+function formatDegradedComment(rawSnippet) {
+    return [
+        markers_js_1.SUMMARY_MARKER,
+        '## 🐯 BanGD 数据库内核评审',
+        '⚠️ 本次未能生成有效的结构化评审（模型返回的内容无法解析）。**不阻塞合入**，可重试，或改用更强的模型。',
+        `<details><summary>模型原始输出片段（调试用）</summary>\n\n\`\`\`\n${rawSnippet}\n\`\`\`\n</details>`,
     ].join('\n\n');
 }
 /** The single, consolidated PR comment (architecture-level, not per-line). */

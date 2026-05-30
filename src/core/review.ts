@@ -9,6 +9,8 @@ import {
 import { selectDimensionsHeuristic, sanitizeDimensions } from './router.js';
 import { ALL_DIMENSION_IDS, DIMENSIONS, type DimensionId } from './dimensions.js';
 import { withRetry } from './retry.js';
+import { InvalidModelOutputError } from './errors.js';
+import { ZodError } from 'zod';
 import { ReviewResultSchema, reviewResultJsonSchema, type ReviewResult } from './schema.js';
 
 /** Context budgets (chars). The diff is the primary signal and is kept (capped);
@@ -73,16 +75,23 @@ export async function review(deps: ReviewDeps, prompts: PromptTexts): Promise<Re
   // The client returns the model's output unvalidated; the core owns the
   // validation boundary so the result is typed without `any`. Retry the whole
   // generate-then-validate step so a single malformed generation isn't fatal.
-  const result = await withRetry(async () => {
-    const raw = await deps.llm.generateStructured({
-      system,
-      user,
-      outputSchema: reviewResultJsonSchema,
-    });
-    return ReviewResultSchema.parse(raw);
-  }, GENERATE_ATTEMPTS);
-
-  return { result, dimensions };
+  // If every attempt yields unparseable output, surface InvalidModelOutputError
+  // carrying the raw output so the shell can log it and degrade gracefully.
+  let lastRaw: unknown;
+  try {
+    const result = await withRetry(async () => {
+      lastRaw = await deps.llm.generateStructured({
+        system,
+        user,
+        outputSchema: reviewResultJsonSchema,
+      });
+      return ReviewResultSchema.parse(lastRaw);
+    }, GENERATE_ATTEMPTS);
+    return { result, dimensions };
+  } catch (error) {
+    if (error instanceof ZodError) throw new InvalidModelOutputError(lastRaw);
+    throw error;
+  }
 }
 
 /**

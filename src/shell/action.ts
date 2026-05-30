@@ -5,7 +5,9 @@ import { GithubPrContext, GithubPublisher } from './github.js';
 import { AnthropicLlmClient } from './llm.js';
 import { loadPromptTexts } from './prompts.js';
 import { publishReview } from './publish.js';
+import { formatDegradedComment } from './format.js';
 import { formatUsage, totalTokens } from '../core/usage.js';
+import { InvalidModelOutputError, rawSnippet } from '../core/errors.js';
 
 function readString(obj: Record<string, unknown>, key: string): string {
   const value = obj[key];
@@ -47,12 +49,29 @@ export async function run(): Promise<void> {
     ...(baseUrl ? { baseURL: baseUrl } : {}),
   });
 
-  const { result, dimensions } = await review({ llm, pr: prContext }, prompts);
+  const publisher = new GithubPublisher(octokit, { owner, repo, pullNumber: pr.number });
+
+  let reviewed: Awaited<ReturnType<typeof review>>;
+  try {
+    reviewed = await review({ llm, pr: prContext }, prompts);
+  } catch (error) {
+    if (error instanceof InvalidModelOutputError) {
+      // Non-blocking: post a degraded comment + log the raw output for diagnosis
+      // instead of failing the run.
+      const snippet = rawSnippet(error.raw);
+      core.warning(`模型未返回有效结构化评审，已降级。Token：${formatUsage(llm.usage)}。原始片段：${snippet}`);
+      await publisher.upsertSummaryComment(formatDegradedComment(snippet));
+      core.setOutput('finding_count', 0);
+      core.setOutput('total_tokens', totalTokens(llm.usage));
+      return;
+    }
+    throw error;
+  }
+  const { result, dimensions } = reviewed;
 
   const usage = llm.usage;
   const footer = `本次评审消耗 token：${formatUsage(usage)}｜维度 [${dimensions.join(', ')}]`;
 
-  const publisher = new GithubPublisher(octokit, { owner, repo, pullNumber: pr.number });
   const published = await publishReview(publisher, result, pr.number, footer);
 
   core.setOutput('finding_count', result.findings.length);

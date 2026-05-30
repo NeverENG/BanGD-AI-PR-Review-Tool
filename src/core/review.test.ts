@@ -3,6 +3,7 @@ import { review, type ReviewDeps } from './review.js';
 import type { LlmClient, LlmRequest, PrContext } from './ports.js';
 import type { PromptTexts } from './prompt.js';
 import { ALL_DIMENSION_IDS, type DimensionId } from './dimensions.js';
+import { InvalidModelOutputError } from './errors.js';
 import { reviewResultJsonSchema, FindingSchema, ReviewResultSchema } from './schema.js';
 
 const prompts: PromptTexts = {
@@ -131,10 +132,14 @@ describe('review (core orchestrator)', () => {
     expect(result.overallRisk).toBe('高');
   });
 
-  it('rejects when every generation violates the schema', async () => {
+  it('throws InvalidModelOutputError (carrying raw) when every generation is invalid', async () => {
     const bad = { summary: 'x', findings: [{ file: 'a.go', severity: 'urgent' }] };
     const deps: ReviewDeps = { llm: fakeLlm(bad), pr: fakePr() };
-    await expect(review(deps, prompts)).rejects.toThrow();
+    await expect(review(deps, prompts)).rejects.toBeInstanceOf(InvalidModelOutputError);
+    await review(deps, prompts).catch((e: unknown) => {
+      expect(e).toBeInstanceOf(InvalidModelOutputError);
+      if (e instanceof InvalidModelOutputError) expect(e.raw).toEqual(bad);
+    });
   });
 });
 
