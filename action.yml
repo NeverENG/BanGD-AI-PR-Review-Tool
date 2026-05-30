@@ -1,0 +1,23 @@
+name: 'BanGD PR Review'
+description: 'AI PR review specialized for the BanDB database-engine vertical — architecture-level findings, not low-effort fixes.'
+author: 'NeverENG'
+
+inputs:
+  anthropic_api_key:
+    description: 'Anthropic API key used to call Claude.'
+    required: true
+  github_token:
+    description: 'Token used to read the PR diff and post the review comment.'
+    required: true
+    default: ${{ github.token }}
+  model:
+    description: 'Claude model id (defaults to claude-opus-4-8).'
+    required: false
+
+outputs:
+  finding_count:
+    description: 'Number of findings BanGD produced.'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
