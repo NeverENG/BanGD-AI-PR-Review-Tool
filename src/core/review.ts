@@ -6,6 +6,7 @@ import {
   truncate,
   type LoadedFile,
 } from './context.js';
+import { withRetry } from './retry.js';
 import { ReviewResultSchema, reviewResultJsonSchema, type ReviewResult } from './schema.js';
 
 /** Context budgets (chars). The diff is the primary signal and is kept (capped);
@@ -13,6 +14,8 @@ import { ReviewResultSchema, reviewResultJsonSchema, type ReviewResult } from '.
 const DIFF_CHAR_CAP = 60_000;
 const FILES_CHAR_BUDGET = 40_000;
 const MAX_FILES_TO_READ = 40;
+/** Total tries for the generate-then-validate step (re-generate on bad output). */
+const GENERATE_ATTEMPTS = 2;
 
 export interface ReviewDeps {
   llm: LlmClient;
@@ -44,13 +47,15 @@ export async function review(deps: ReviewDeps, prompts: PromptTexts): Promise<Re
     filesBlock.text,
   );
 
-  const raw = await deps.llm.generateStructured({
-    system,
-    user,
-    outputSchema: reviewResultJsonSchema,
-  });
-
   // The client returns the model's output unvalidated; the core owns the
-  // validation boundary so the result is typed without `any`.
-  return ReviewResultSchema.parse(raw);
+  // validation boundary so the result is typed without `any`. Retry the whole
+  // generate-then-validate step so a single malformed generation isn't fatal.
+  return withRetry(async () => {
+    const raw = await deps.llm.generateStructured({
+      system,
+      user,
+      outputSchema: reviewResultJsonSchema,
+    });
+    return ReviewResultSchema.parse(raw);
+  }, GENERATE_ATTEMPTS);
 }

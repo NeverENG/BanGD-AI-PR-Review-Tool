@@ -97,7 +97,21 @@ describe('review (core orchestrator)', () => {
     expect(seen?.user).toContain('FULL FILE BODY');
   });
 
-  it('rejects model output that violates the schema', async () => {
+  it('re-generates once when the first model output is malformed', async () => {
+    const bad = { summary: 'x', findings: [{ file: 'a.go', severity: 'urgent' }] };
+    let calls = 0;
+    const llm: LlmClient = {
+      generateStructured: () => {
+        calls++;
+        return Promise.resolve(calls === 1 ? bad : validResult);
+      },
+    };
+    const result = await review({ llm, pr: fakePr() }, prompts);
+    expect(calls).toBe(2);
+    expect(result.overallRisk).toBe('高');
+  });
+
+  it('rejects when every generation violates the schema', async () => {
     const bad = { summary: 'x', findings: [{ file: 'a.go', severity: 'urgent' }] };
     const deps: ReviewDeps = { llm: fakeLlm(bad), pr: fakePr() };
     await expect(review(deps, prompts)).rejects.toThrow();

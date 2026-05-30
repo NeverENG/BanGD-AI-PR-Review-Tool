@@ -35631,6 +35631,37 @@ function assembleUserPrompt(metadata, diff, filesText) {
 
 /***/ }),
 
+/***/ 7253:
+/***/ ((__unused_webpack_module, exports) => {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.withRetry = withRetry;
+/**
+ * Run `fn`, retrying up to `attempts` total tries on any thrown error. Used to
+ * wrap the LLM-generate-then-validate step: a one-off bad generation (malformed
+ * JSON / missing tool_use → Zod throws) gets another try. Transient HTTP errors
+ * are handled lower down by the SDK's own retry; this layer covers the
+ * pipeline-level "the model produced something we can't use" case.
+ */
+async function withRetry(fn, attempts) {
+    if (attempts < 1)
+        throw new Error('attempts 必须 >= 1');
+    let lastError;
+    for (let i = 0; i < attempts; i++) {
+        try {
+            return await fn();
+        }
+        catch (error) {
+            lastError = error;
+        }
+    }
+    throw lastError;
+}
+
+
+/***/ }),
+
 /***/ 7935:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -35639,12 +35670,15 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.review = review;
 const prompt_js_1 = __nccwpck_require__(5301);
 const context_js_1 = __nccwpck_require__(8480);
+const retry_js_1 = __nccwpck_require__(7253);
 const schema_js_1 = __nccwpck_require__(2032);
 /** Context budgets (chars). The diff is the primary signal and is kept (capped);
  * changed-file contents fill the remaining budget. ~chars/3-4 ≈ tokens. */
 const DIFF_CHAR_CAP = 60_000;
 const FILES_CHAR_BUDGET = 40_000;
 const MAX_FILES_TO_READ = 40;
+/** Total tries for the generate-then-validate step (re-generate on bad output). */
+const GENERATE_ATTEMPTS = 2;
 /**
  * The trigger-agnostic core: gather context → call the LLM → validate the
  * structured result. Knows nothing about GitHub, Actions, or transport. Both
@@ -35664,14 +35698,17 @@ async function review(deps, prompts) {
     const filesBlock = (0, context_js_1.assembleFilesBlock)(loaded, FILES_CHAR_BUDGET);
     const system = (0, prompt_js_1.assembleSystemPrompt)(prompts);
     const user = (0, prompt_js_1.assembleUserPrompt)(deps.pr.metadata, (0, context_js_1.truncate)(diff, DIFF_CHAR_CAP).text, filesBlock.text);
-    const raw = await deps.llm.generateStructured({
-        system,
-        user,
-        outputSchema: schema_js_1.reviewResultJsonSchema,
-    });
     // The client returns the model's output unvalidated; the core owns the
-    // validation boundary so the result is typed without `any`.
-    return schema_js_1.ReviewResultSchema.parse(raw);
+    // validation boundary so the result is typed without `any`. Retry the whole
+    // generate-then-validate step so a single malformed generation isn't fatal.
+    return (0, retry_js_1.withRetry)(async () => {
+        const raw = await deps.llm.generateStructured({
+            system,
+            user,
+            outputSchema: schema_js_1.reviewResultJsonSchema,
+        });
+        return schema_js_1.ReviewResultSchema.parse(raw);
+    }, GENERATE_ATTEMPTS);
 }
 
 
@@ -35997,6 +36034,8 @@ class AnthropicLlmClient {
     constructor(options) {
         this.client = new sdk_1.default({
             apiKey: options.apiKey,
+            maxRetries: options.maxRetries ?? 2,
+            timeout: options.timeoutMs ?? 120_000,
             ...(options.baseURL ? { baseURL: options.baseURL } : {}),
         });
         this.model = options.model ?? 'claude-opus-4-8';

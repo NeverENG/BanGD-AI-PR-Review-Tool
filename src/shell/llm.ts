@@ -15,6 +15,10 @@ export interface AnthropicLlmOptions {
   baseURL?: string;
   /** Force prompt caching on/off; defaults to on only for Anthropic itself. */
   promptCaching?: boolean;
+  /** SDK-level retries on transient HTTP errors (429/5xx). Default 2. */
+  maxRetries?: number;
+  /** Per-request timeout in ms. Default 120_000. */
+  timeoutMs?: number;
 }
 
 /**
@@ -41,6 +45,8 @@ export class AnthropicLlmClient implements LlmClient {
   constructor(options: AnthropicLlmOptions) {
     this.client = new Anthropic({
       apiKey: options.apiKey,
+      maxRetries: options.maxRetries ?? 2,
+      timeout: options.timeoutMs ?? 120_000,
       ...(options.baseURL ? { baseURL: options.baseURL } : {}),
     });
     this.model = options.model ?? 'claude-opus-4-8';
