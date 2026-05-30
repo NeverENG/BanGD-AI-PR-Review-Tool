@@ -28,6 +28,7 @@ BanGD 是一个面向 **BanDB 数据库引擎（Go）垂类**的 AI PR 评审助
 - **为什么是 Claude**：代码与架构推理能力强；原生支持 **tool-use 强制结构化输出**与 **prompt caching**，这两点直接服务于准确性和响应速度（见下）。
 - **结构化输出而非解析自由文本**：`AnthropicLlmClient` 用一个 `submit_review` 工具，把 `ReviewResult` 的 JSON Schema 作为 `input_schema` 强制模型按结构产出，再由 core 用 Zod 校验（`ReviewResultSchema.parse`）。这样**端到端类型安全、零正则解析、无格式抖动**——这是误报控制的第一道闸：格式错误的"幻觉结果"在解析边界就被拒绝。
 - **分档空间**：模型是注入参数，未来可做**分档**——用便宜快速的档（如 Haiku）做变更总结/初筛，用 Opus 做深度 finding，在速度/成本与深度间取舍。
+- **Provider 可配置（开发/生产分离）**：`AnthropicLlmClient` 支持 `baseURL`，可指向 Anthropic 兼容端点（如 DeepSeek 的 `https://api.deepseek.com/anthropic`）。**开发/冒烟用便宜的兼容模型打通链路，生产用 Opus 保证点评质量**——前者验证"链路通不通"，后者决定"点评准不准"，二者不可混淆。prompt caching 是 Anthropic 专有能力，对兼容 provider 自动关闭（`shouldUsePromptCaching`）。
 
 ---
 
