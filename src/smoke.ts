@@ -13,9 +13,10 @@
  */
 import { review } from './core/review.js';
 import type { PrContext } from './core/ports.js';
+import { groupFindings } from './core/publish.js';
 import { AnthropicLlmClient } from './shell/llm.js';
 import { loadPromptTexts } from './shell/prompts.js';
-import { formatReviewComment } from './shell/format.js';
+import { formatSummaryComment, formatIssueBody } from './shell/format.js';
 
 const apiKey = process.env['ANTHROPIC_API_KEY'] ?? process.env['DEEPSEEK_API_KEY'];
 if (!apiKey) {
@@ -85,5 +86,15 @@ console.error(`调用模型 ${model ?? 'claude-opus-4-8'}${baseURL ? ` @ ${baseU
 const { result, dimensions } = await review({ llm, pr }, prompts);
 
 console.error(`选中的评审维度：[${dimensions.join(', ')}]`);
-console.log(formatReviewComment(result));
+
+// Simulate publishing locally (no GitHub): one group per architecture problem.
+const groups = groupFindings(result.findings, 0);
+const items = groups.map((group) => ({ group, url: null }));
+
+console.log('=== PR 汇总评论 ===\n');
+console.log(formatSummaryComment(result, items));
+for (const group of groups) {
+  console.log('\n=== Issue ===\n');
+  console.log(formatIssueBody(group, 0));
+}
 console.log('\n--- raw ReviewResult ---\n' + JSON.stringify(result, null, 2));

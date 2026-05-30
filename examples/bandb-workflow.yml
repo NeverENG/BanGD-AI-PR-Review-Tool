@@ -10,7 +10,8 @@ on:
 
 permissions:
   contents: read          # read the diff / file contents
-  pull-requests: write    # post the review comment
+  pull-requests: write    # post the single summary comment
+  issues: write           # file one issue per architecture problem (non-blocking)
 
 jobs:
   review:
