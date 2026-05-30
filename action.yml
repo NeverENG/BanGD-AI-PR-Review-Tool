@@ -26,3 +26,10 @@ outputs:
 runs:
   using: 'node20'
   main: 'dist/index.js'
+
+# Shown on the GitHub Marketplace listing. icon must be from GitHub's allowed
+# Feather subset; color one of: white, yellow, blue, green, orange, red,
+# purple, gray-dark.
+branding:
+  icon: 'database'
+  color: 'purple'
