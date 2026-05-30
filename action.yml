@@ -16,12 +16,18 @@ inputs:
   base_url:
     description: 'Anthropic-compatible API base URL. Leave empty for Anthropic; set https://api.deepseek.com/anthropic for DeepSeek.'
     required: false
+  verify_votes:
+    description: 'Adversarial verification refuters per finding (majority refute drops it as a false positive). 0 disables. Default 3.'
+    required: false
+    default: '3'
 
 outputs:
   finding_count:
-    description: 'Number of findings BanGD produced.'
+    description: 'Number of findings BanGD produced (after adversarial verification).'
   total_tokens:
-    description: 'Total tokens consumed by this review run (routing + review).'
+    description: 'Total tokens consumed by this review run (routing + planning + review + verification).'
+  dropped_count:
+    description: 'Findings dropped by adversarial verification as likely false positives.'
 
 runs:
   using: 'node20'

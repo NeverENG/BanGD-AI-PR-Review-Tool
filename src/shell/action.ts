@@ -19,6 +19,8 @@ export async function run(): Promise<void> {
   const githubToken = core.getInput('github_token', { required: true });
   const model = core.getInput('model') || undefined;
   const baseUrl = core.getInput('base_url') || undefined;
+  const verifyVotesRaw = parseInt(core.getInput('verify_votes'), 10);
+  const verifyVotes = Number.isFinite(verifyVotesRaw) && verifyVotesRaw >= 0 ? verifyVotesRaw : 3;
 
   const pr = github.context.payload.pull_request;
   if (!pr) {
@@ -53,7 +55,7 @@ export async function run(): Promise<void> {
 
   let reviewed: Awaited<ReturnType<typeof review>>;
   try {
-    reviewed = await review({ llm, pr: prContext }, prompts);
+    reviewed = await review({ llm, pr: prContext }, prompts, { verifyVotes });
   } catch (error) {
     if (error instanceof InvalidModelOutputError) {
       // Non-blocking: post a degraded comment + log the raw output for diagnosis
@@ -67,18 +69,24 @@ export async function run(): Promise<void> {
     }
     throw error;
   }
-  const { result, dimensions, relatedFiles } = reviewed;
+  const { result, dimensions, relatedFiles, droppedFindings } = reviewed;
 
   const usage = llm.usage;
   const relatedNote = relatedFiles.length > 0 ? `｜补充阅读周边文件 [${relatedFiles.join(', ')}]` : '';
-  const footer = `本次评审消耗 token：${formatUsage(usage)}｜维度 [${dimensions.join(', ')}]${relatedNote}`;
+  const verifyNote =
+    verifyVotes > 0
+      ? `｜对抗式复核 ${verifyVotes} 票/条，过滤疑似误报 ${droppedFindings.length} 条`
+      : '';
+  const footer = `本次评审消耗 token：${formatUsage(usage)}｜维度 [${dimensions.join(', ')}]${relatedNote}${verifyNote}`;
 
   const published = await publishReview(publisher, result, pr.number, footer);
 
   core.setOutput('finding_count', result.findings.length);
   core.setOutput('total_tokens', totalTokens(usage));
+  core.setOutput('dropped_count', droppedFindings.length);
   core.info(
-    `BanGD 评审完成，维度=[${dimensions.join(', ')}]，共 ${result.findings.length} 条 finding；` +
+    `BanGD 评审完成，维度=[${dimensions.join(', ')}]，共 ${result.findings.length} 条 finding` +
+      `（对抗式复核过滤 ${droppedFindings.length} 条疑似误报）；` +
       `补充阅读周边文件 ${relatedFiles.length} 个${relatedFiles.length > 0 ? ` [${relatedFiles.join(', ')}]` : ''}；` +
       `新建 Issue ${published.created} 个，复用 ${published.reused} 个${published.degraded ? '（部分降级为内联）' : ''}。`,
   );
