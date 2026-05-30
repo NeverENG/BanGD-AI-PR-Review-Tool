@@ -46,7 +46,7 @@ export async function run(): Promise<void> {
     ...(baseUrl ? { baseURL: baseUrl } : {}),
   });
 
-  const result = await review({ llm, pr: prContext }, prompts);
+  const { result, dimensions } = await review({ llm, pr: prContext }, prompts);
 
   await octokit.rest.issues.createComment({
     owner,
@@ -56,7 +56,7 @@ export async function run(): Promise<void> {
   });
 
   core.setOutput('finding_count', result.findings.length);
-  core.info(`BanGD 评审完成，共 ${result.findings.length} 条 finding。`);
+  core.info(`BanGD 评审完成，维度=[${dimensions.join(', ')}]，共 ${result.findings.length} 条 finding。`);
 }
 
 run().catch((error: unknown) => {

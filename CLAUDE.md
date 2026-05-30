@@ -28,7 +28,8 @@ The keystone is **dependency injection through two ports**, which delivers trigg
 - `src/core/` — trigger-agnostic. `review(deps, prompts)` does `gather context → call LLM → Zod-validate`. Imports neither Octokit nor `@actions/*`.
   - `schema.ts` — Zod `Finding`/`ReviewResult`; TS types are `z.infer`-ed from them. Also a hand-written `reviewResultJsonSchema` (the tool input_schema), kept in sync with Zod by a test.
   - `ports.ts` — `LlmClient` and `PrContext` interfaces (the injection seam). `LlmClient.generateStructured` returns `unknown`; the core owns validation.
-  - `prompt.ts` / `review.ts` — prompt assembly + orchestrator.
+  - `prompt.ts` / `review.ts` — prompt assembly + orchestrator. `review()` returns `{result, dimensions}`.
+  - `dimensions.ts` / `router.ts` — **progressive disclosure**: the rubric is split per dimension under `prompts/rubric/<id>.md`; the router picks relevant dimensions by keyword (heuristic), falling back to an LLM classify call then to all dimensions, so each request carries only the applicable rubric fragments + examples (token savings).
 - `src/shell/` — thin adapters that implement the ports. `llm.ts` (Anthropic, tool-use structured output + prompt caching), `github.ts` (Octokit `PrContext`), `format.ts` (pure `ReviewResult`→Markdown), `prompts.ts` (loads `prompts/*.md` — IO lives in the shell, core stays pure), `action.ts` (entry).
 - `action.yml` — Action metadata; runs `dist/index.js`.
 

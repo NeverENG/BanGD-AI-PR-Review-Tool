@@ -35594,6 +35594,76 @@ function assembleFilesBlock(files, budgetChars) {
 
 /***/ }),
 
+/***/ 8094:
+/***/ ((__unused_webpack_module, exports) => {
+
+
+/**
+ * The review dimensions. Each maps to a rubric fragment (prompts/rubric/<id>.md)
+ * and optionally a few-shot example (prompts/examples/<exampleFile>). This is the
+ * progressive-disclosure registry: instead of sending the whole rubric + every
+ * example on every request, the router picks the relevant dimension ids and only
+ * those fragments/examples are loaded into the prompt (see router.ts, review.ts).
+ *
+ * `keywords` drive the heuristic router. They are matched case-insensitively
+ * against the diff text and changed-file paths.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.ALL_DIMENSION_IDS = exports.DIMENSIONS = void 0;
+exports.DIMENSIONS = [
+    {
+        id: 'concurrency',
+        title: '并发与同步',
+        exampleFile: 'concurrency-panic-dual-table.md',
+        keywords: ['go func', 'goroutine', 'chan ', 'chan)', 'channel', 'sync.', 'mutex', 'atomic', 'map[', 'race', '并发', '计数'],
+    },
+    {
+        id: 'memory',
+        title: '内存管理与生命周期',
+        keywords: ['unsafe', 'sync.pool', 'buffer', '内存', 'alloc', 'free(', '复用', '[]byte'],
+    },
+    {
+        id: 'lock',
+        title: '锁与隔离级别',
+        keywords: ['lock(', 'unlock', 'rlock', 'runlock', 'mvcc', 'isolation', '隔离', '事务', 'transaction', 'deadlock', '死锁'],
+    },
+    {
+        id: 'storage',
+        title: '存储格式、WAL 与崩溃恢复',
+        exampleFile: 'wal-ordering-crash-safety.md',
+        keywords: ['wal', 'fsync', 'checkpoint', 'redo', 'undo', 'snapshot', 'sstable', 'flush', '落盘', '磁盘', 'serialize', '序列化'],
+    },
+    {
+        id: 'schema',
+        title: 'Schema 演进与迁移',
+        keywords: ['schema', 'alter', 'migrat', '迁移', '表结构', 'column', 'ddl'],
+    },
+    {
+        id: 'performance',
+        title: '热路径性能',
+        keywords: ['index', '索引', 'scan', '热路径', 'hot path', 'benchmark', 'cache', '缓存', '批处理', 'batch'],
+    },
+    {
+        id: 'resource',
+        title: '资源与泄漏',
+        keywords: ['defer ', 'close()', '.close(', 'context', 'ctx', '句柄', 'connection', '泄漏', 'leak'],
+    },
+    {
+        id: 'error',
+        title: '错误处理与崩溃安全',
+        keywords: ['panic', 'recover', 'err !=', 'err ==', '_ =', 'partial', '吞'],
+    },
+    {
+        id: 'compatibility',
+        title: '接口与兼容契约',
+        keywords: ['proto', 'rpc', 'grpc', 'api', '协议', 'config', '兼容', 'version', '版本'],
+    },
+];
+exports.ALL_DIMENSION_IDS = exports.DIMENSIONS.map((d) => d.id);
+
+
+/***/ }),
+
 /***/ 5301:
 /***/ ((__unused_webpack_module, exports) => {
 
@@ -35601,15 +35671,20 @@ function assembleFilesBlock(files, budgetChars) {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.assembleSystemPrompt = assembleSystemPrompt;
 exports.assembleUserPrompt = assembleUserPrompt;
-function assembleSystemPrompt(texts) {
-    const exampleBlock = texts.examples
-        .map((ex, i) => `## 范例 ${i + 1}\n\n${ex}`)
-        .join('\n\n');
-    return [
-        texts.systemPrompt,
-        '# 评审 Rubric\n\n' + texts.rubric,
-        '# Few-shot 范例\n\n' + exampleBlock,
-    ].join('\n\n---\n\n');
+/**
+ * Assemble the system prompt from the persona + only the selected rubric
+ * fragments and their matching examples.
+ */
+function assembleSystemPrompt(systemPrompt, rubricFragments, examples) {
+    const parts = [systemPrompt];
+    if (rubricFragments.length > 0) {
+        parts.push('# 评审 Rubric（仅与本 PR 相关的维度）\n\n' + rubricFragments.join('\n\n'));
+    }
+    if (examples.length > 0) {
+        const block = examples.map((ex, i) => `## 范例 ${i + 1}\n\n${ex}`).join('\n\n');
+        parts.push('# Few-shot 范例\n\n' + block);
+    }
+    return parts.join('\n\n---\n\n');
 }
 function assembleUserPrompt(metadata, diff, filesText) {
     const sections = [
@@ -35670,6 +35745,8 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.review = review;
 const prompt_js_1 = __nccwpck_require__(5301);
 const context_js_1 = __nccwpck_require__(8480);
+const router_js_1 = __nccwpck_require__(2086);
+const dimensions_js_1 = __nccwpck_require__(8094);
 const retry_js_1 = __nccwpck_require__(7253);
 const schema_js_1 = __nccwpck_require__(2032);
 /** Context budgets (chars). The diff is the primary signal and is kept (capped);
@@ -35677,17 +35754,25 @@ const schema_js_1 = __nccwpck_require__(2032);
 const DIFF_CHAR_CAP = 60_000;
 const FILES_CHAR_BUDGET = 40_000;
 const MAX_FILES_TO_READ = 40;
+const ROUTING_MATERIAL_CAP = 8_000;
 /** Total tries for the generate-then-validate step (re-generate on bad output). */
 const GENERATE_ATTEMPTS = 2;
+const ROUTING_SCHEMA = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['dimensions'],
+    properties: {
+        dimensions: { type: 'array', items: { type: 'string', enum: dimensions_js_1.ALL_DIMENSION_IDS } },
+    },
+};
 /**
- * The trigger-agnostic core: gather context → call the LLM → validate the
- * structured result. Knows nothing about GitHub, Actions, or transport. Both
- * the Action shell and the future App shell call this with concrete ports.
+ * The trigger-agnostic core: route → gather context → call the LLM → validate.
+ * Progressive disclosure: only the relevant rubric fragments + examples are sent
+ * (heuristic router, LLM fallback when nothing matches), to cut tokens while
+ * keeping review quality on the dimensions that apply.
  */
 async function review(deps, prompts) {
     const diff = await deps.pr.getDiff();
-    // Read the full contents of the changed files so the model sees more than the
-    // diff hunks (their untouched methods, same-file type defs, etc.).
     const changedFiles = (0, context_js_1.extractChangedFiles)(diff).slice(0, MAX_FILES_TO_READ);
     const loaded = [];
     for (const path of changedFiles) {
@@ -35696,12 +35781,17 @@ async function review(deps, prompts) {
             loaded.push({ path, content });
     }
     const filesBlock = (0, context_js_1.assembleFilesBlock)(loaded, FILES_CHAR_BUDGET);
-    const system = (0, prompt_js_1.assembleSystemPrompt)(prompts);
+    const dimensions = await selectDimensions(deps.llm, diff, changedFiles, loaded);
+    const rubricFragments = dimensions.map((id) => prompts.rubric[id]);
+    const examples = dimensions
+        .map((id) => prompts.examples[id])
+        .filter((ex) => ex !== undefined);
+    const system = (0, prompt_js_1.assembleSystemPrompt)(prompts.systemPrompt, rubricFragments, examples);
     const user = (0, prompt_js_1.assembleUserPrompt)(deps.pr.metadata, (0, context_js_1.truncate)(diff, DIFF_CHAR_CAP).text, filesBlock.text);
     // The client returns the model's output unvalidated; the core owns the
     // validation boundary so the result is typed without `any`. Retry the whole
     // generate-then-validate step so a single malformed generation isn't fatal.
-    return (0, retry_js_1.withRetry)(async () => {
+    const result = await (0, retry_js_1.withRetry)(async () => {
         const raw = await deps.llm.generateStructured({
             system,
             user,
@@ -35709,6 +35799,78 @@ async function review(deps, prompts) {
         });
         return schema_js_1.ReviewResultSchema.parse(raw);
     }, GENERATE_ATTEMPTS);
+    return { result, dimensions };
+}
+/**
+ * Pick the rubric dimensions to send: heuristic first; if it matches nothing,
+ * ask the LLM; if that is still empty, fall back to all dimensions (safe but
+ * token-heavy — rare).
+ */
+async function selectDimensions(llm, diff, changedFiles, loaded) {
+    const material = [diff, changedFiles.join('\n'), ...loaded.map((f) => f.content)].join('\n');
+    const heuristic = (0, router_js_1.selectDimensionsHeuristic)(material);
+    if (heuristic.length > 0)
+        return heuristic;
+    const llmPicked = await routeWithLlm(llm, material);
+    if (llmPicked.length > 0)
+        return llmPicked;
+    return dimensions_js_1.ALL_DIMENSION_IDS;
+}
+async function routeWithLlm(llm, material) {
+    const dimensionList = dimensions_js_1.DIMENSIONS.map((d) => `- ${d.id}: ${d.title}`).join('\n');
+    try {
+        const raw = await llm.generateStructured({
+            system: '你是一个分流器。根据 PR 内容，从给定维度里选出与本 PR 相关的维度 id（可多选，只返回相关的）。',
+            user: `可选维度：\n${dimensionList}\n\n# PR 内容（节选）\n${(0, context_js_1.truncate)(material, ROUTING_MATERIAL_CAP).text}`,
+            outputSchema: ROUTING_SCHEMA,
+        });
+        const dims = raw.dimensions;
+        return Array.isArray(dims) ? (0, router_js_1.sanitizeDimensions)(dims.filter((d) => typeof d === 'string')) : [];
+    }
+    catch {
+        return [];
+    }
+}
+
+
+/***/ }),
+
+/***/ 2086:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.MAX_DIMENSIONS = void 0;
+exports.selectDimensionsHeuristic = selectDimensionsHeuristic;
+exports.sanitizeDimensions = sanitizeDimensions;
+const dimensions_js_1 = __nccwpck_require__(8094);
+/** Cap on how many dimensions to send, to keep the prompt bounded. */
+exports.MAX_DIMENSIONS = 5;
+/**
+ * Heuristic router: pick the dimensions whose keywords appear in the review
+ * material (diff text + changed-file paths). Order-preserving (registry order),
+ * de-duplicated, capped at MAX_DIMENSIONS. Returns [] when nothing matches —
+ * the caller then falls back to the LLM router.
+ */
+function selectDimensionsHeuristic(material) {
+    const haystack = material.toLowerCase();
+    const matched = [];
+    for (const dim of dimensions_js_1.DIMENSIONS) {
+        if (dim.keywords.some((kw) => haystack.includes(kw))) {
+            matched.push(dim.id);
+        }
+    }
+    return matched.slice(0, exports.MAX_DIMENSIONS);
+}
+/** Keep only valid dimension ids (e.g. from an LLM response), de-duped & capped. */
+function sanitizeDimensions(ids) {
+    const valid = new Set(dimensions_js_1.DIMENSIONS.map((d) => d.id));
+    const out = [];
+    for (const id of ids) {
+        if (valid.has(id) && !out.includes(id))
+            out.push(id);
+    }
+    return out.slice(0, exports.MAX_DIMENSIONS);
 }
 
 
@@ -35888,7 +36050,7 @@ async function run() {
         ...(model ? { model } : {}),
         ...(baseUrl ? { baseURL: baseUrl } : {}),
     });
-    const result = await (0, review_js_1.review)({ llm, pr: prContext }, prompts);
+    const { result, dimensions } = await (0, review_js_1.review)({ llm, pr: prContext }, prompts);
     await octokit.rest.issues.createComment({
         owner,
         repo,
@@ -35896,7 +36058,7 @@ async function run() {
         body: (0, format_js_1.formatReviewComment)(result),
     });
     core.setOutput('finding_count', result.findings.length);
-    core.info(`BanGD 评审完成，共 ${result.findings.length} 条 finding。`);
+    core.info(`BanGD 评审完成，维度=[${dimensions.join(', ')}]，共 ${result.findings.length} 条 finding。`);
 }
 run().catch((error) => {
     core.setFailed(error instanceof Error ? error.message : String(error));
@@ -36086,31 +36248,30 @@ const promises_1 = __nccwpck_require__(1455);
 const node_fs_1 = __nccwpck_require__(3024);
 const node_path_1 = __nccwpck_require__(6760);
 const node_url_1 = __nccwpck_require__(3136);
+const dimensions_js_1 = __nccwpck_require__(8094);
 /**
- * Loads the fixed prompt text from prompts/*.md. The shell does this (not the
- * core) so the core stays pure and unit-testable. `promptsDir` defaults to the
- * repo's prompts/ directory relative to this compiled file.
+ * Loads the fixed prompt text from prompts/*. All rubric fragments and examples
+ * are loaded (disk reads are free); the orchestrator decides which to actually
+ * send to the model. The shell does the IO so the core stays pure/testable.
  */
 async function loadPromptTexts(promptsDir) {
     const dir = promptsDir ?? defaultPromptsDir();
-    const [systemPrompt, rubric, examples] = await Promise.all([
-        (0, promises_1.readFile)((0, node_path_1.join)(dir, 'system-prompt.md'), 'utf8'),
-        (0, promises_1.readFile)((0, node_path_1.join)(dir, 'rubric.md'), 'utf8'),
-        loadExamples((0, node_path_1.join)(dir, 'examples')),
-    ]);
+    const systemPrompt = await (0, promises_1.readFile)((0, node_path_1.join)(dir, 'system-prompt.md'), 'utf8');
+    const rubricEntries = await Promise.all(dimensions_js_1.DIMENSIONS.map(async (d) => [
+        d.id,
+        await (0, promises_1.readFile)((0, node_path_1.join)(dir, 'rubric', `${d.id}.md`), 'utf8'),
+    ]));
+    const rubric = Object.fromEntries(rubricEntries);
+    const examples = {};
+    await Promise.all(dimensions_js_1.DIMENSIONS.filter((d) => d.exampleFile).map(async (d) => {
+        examples[d.id] = await (0, promises_1.readFile)((0, node_path_1.join)(dir, 'examples', d.exampleFile), 'utf8');
+    }));
     return { systemPrompt, rubric, examples };
-}
-async function loadExamples(examplesDir) {
-    const entries = await (0, promises_1.readdir)(examplesDir);
-    const files = entries.filter((name) => name.endsWith('.md')).sort();
-    return Promise.all(files.map((name) => (0, promises_1.readFile)((0, node_path_1.join)(examplesDir, name), 'utf8')));
 }
 /**
  * Find the prompts/ directory by ascending from this module's location until a
- * `prompts/system-prompt.md` is found. This is layout-independent on purpose:
- * the module ships at different depths depending on the build (vitest runs
- * `src/shell/`, tsc emits `build/shell/`, ncc bundles a flat `dist/`), so a
- * fixed relative climb breaks in at least one of them.
+ * `prompts/system-prompt.md` is found. Layout-independent (vitest runs src/,
+ * tsc emits build/, ncc bundles a flat dist/).
  */
 function defaultPromptsDir() {
     let dir = (0, node_url_1.fileURLToPath)(new URL(/* asset import */ __nccwpck_require__(3896), __nccwpck_require__.b));

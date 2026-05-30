@@ -1,30 +1,40 @@
 import type { PrMetadata } from './ports.js';
+import type { DimensionId } from './dimensions.js';
 
 /**
- * The fixed prompt text injected into the core (loaded from prompts/*.md by the
- * shell, never read from disk by the core itself — keeps the core pure and
- * testable). These three blocks are large and stable, so the shell marks them
- * as the cache breakpoint for Anthropic prompt caching; the per-PR diff is the
- * only uncached tail.
+ * The fixed prompt text injected into the core (loaded from prompts/* by the
+ * shell, never read from disk by the core itself). For progressive disclosure
+ * the rubric is split per dimension and examples are keyed by dimension; the
+ * orchestrator selects only the relevant ones before assembling the prompt, so
+ * each request carries just the rubric fragments + examples that apply.
  */
 export interface PromptTexts {
-  /** prompts/system-prompt.md */
+  /** prompts/system-prompt.md — always included. */
   systemPrompt: string;
-  /** prompts/rubric.md */
-  rubric: string;
-  /** prompts/examples/*.md */
-  examples: string[];
+  /** dimension id → prompts/rubric/<id>.md */
+  rubric: Record<DimensionId, string>;
+  /** dimension id → prompts/examples/<file> (only dimensions that have one) */
+  examples: Partial<Record<DimensionId, string>>;
 }
 
-export function assembleSystemPrompt(texts: PromptTexts): string {
-  const exampleBlock = texts.examples
-    .map((ex, i) => `## 范例 ${i + 1}\n\n${ex}`)
-    .join('\n\n');
-  return [
-    texts.systemPrompt,
-    '# 评审 Rubric\n\n' + texts.rubric,
-    '# Few-shot 范例\n\n' + exampleBlock,
-  ].join('\n\n---\n\n');
+/**
+ * Assemble the system prompt from the persona + only the selected rubric
+ * fragments and their matching examples.
+ */
+export function assembleSystemPrompt(
+  systemPrompt: string,
+  rubricFragments: string[],
+  examples: string[],
+): string {
+  const parts = [systemPrompt];
+  if (rubricFragments.length > 0) {
+    parts.push('# 评审 Rubric（仅与本 PR 相关的维度）\n\n' + rubricFragments.join('\n\n'));
+  }
+  if (examples.length > 0) {
+    const block = examples.map((ex, i) => `## 范例 ${i + 1}\n\n${ex}`).join('\n\n');
+    parts.push('# Few-shot 范例\n\n' + block);
+  }
+  return parts.join('\n\n---\n\n');
 }
 
 export function assembleUserPrompt(metadata: PrMetadata, diff: string, filesText: string): string {
