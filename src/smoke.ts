@@ -26,18 +26,43 @@ const baseURL = process.env['ANTHROPIC_BASE_URL'];
 const model = process.env['BANGD_MODEL'];
 
 const SAMPLE_DIFF = `diff --git a/cache/block.go b/cache/block.go
-@@ type BlockCache struct {
+--- a/cache/block.go
++++ b/cache/block.go
+@@ -3,6 +3,7 @@ package cache
+ type BlockCache struct {
  	blocks map[uint64]*Block
 +	hits   uint64
  }
 
- func (c *BlockCache) Get(id uint64) *Block {
+@@ -10,6 +11,9 @@ func (c *BlockCache) Get(id uint64) *Block {
  	b := c.blocks[id]
 +	if b != nil {
 +		c.hits++
 +	}
  	return b
  }`;
+
+// Full contents of the changed file, so the smoke run exercises A1's
+// changed-file reading (not just the diff hunks).
+const SAMPLE_FILES: Record<string, string> = {
+  'cache/block.go': `package cache
+
+type Block struct{ data []byte }
+
+type BlockCache struct {
+	blocks map[uint64]*Block
+	hits   uint64
+}
+
+func (c *BlockCache) Get(id uint64) *Block {
+	b := c.blocks[id]
+	if b != nil {
+		c.hits++
+	}
+	return b
+}
+`,
+};
 
 const pr: PrContext = {
   metadata: {
@@ -46,7 +71,7 @@ const pr: PrContext = {
     number: null,
   },
   getDiff: () => Promise.resolve(SAMPLE_DIFF),
-  readFile: () => Promise.resolve(null),
+  readFile: (path: string) => Promise.resolve(SAMPLE_FILES[path] ?? null),
 };
 
 const prompts = await loadPromptTexts();

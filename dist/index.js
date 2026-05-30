@@ -35521,6 +35521,79 @@ function wrappy (fn, cb) {
 
 /***/ }),
 
+/***/ 8480:
+/***/ ((__unused_webpack_module, exports) => {
+
+
+/**
+ * Pure helpers for building the code context sent to the model. Reviewing only
+ * the diff makes BanGD a generic linter; including the *full* contents of the
+ * changed files lets it see the untouched parts of those files (other methods,
+ * same-file type definitions) needed for architecture-level reasoning.
+ *
+ * Note: this reads the *changed* files in full. It does NOT fetch untouched
+ * *related* files (a struct defined elsewhere, the caller holding a lock) — that
+ * is the job of a future model-driven file-request loop.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.extractChangedFiles = extractChangedFiles;
+exports.truncate = truncate;
+exports.assembleFilesBlock = assembleFilesBlock;
+/**
+ * Extract the post-image paths from a unified diff (the `+++ b/<path>` lines),
+ * skipping deletions (`+++ /dev/null`). On renames the `+++` line already
+ * carries the new path. De-duplicated, order-preserving.
+ */
+function extractChangedFiles(diff) {
+    const files = [];
+    for (const line of diff.split('\n')) {
+        if (!line.startsWith('+++ '))
+            continue;
+        let path = line.slice(4).trim();
+        if (path === '/dev/null')
+            continue;
+        path = path.replace(/^[ab]\//, '');
+        // Drop a trailing tab-separated timestamp some diff formats append.
+        const tab = path.indexOf('\t');
+        if (tab !== -1)
+            path = path.slice(0, tab);
+        if (path && !files.includes(path))
+            files.push(path);
+    }
+    return files;
+}
+/** Truncate a string to `max` chars, appending a marker when cut. */
+function truncate(text, max) {
+    if (text.length <= max)
+        return { text, truncated: false };
+    return { text: text.slice(0, max) + `\n... [内容因超长被截断，省略 ${text.length - max} 字符] ...`, truncated: true };
+}
+/**
+ * Assemble the changed-file contents into one block, including files until the
+ * char budget is exhausted (the diff is sent separately and always kept). A
+ * file that would overflow the budget is skipped, not partially included.
+ */
+function assembleFilesBlock(files, budgetChars) {
+    const parts = [];
+    let used = 0;
+    let included = 0;
+    let skipped = 0;
+    for (const file of files) {
+        const block = `### ${file.path}\n\`\`\`go\n${file.content}\n\`\`\``;
+        if (used + block.length > budgetChars) {
+            skipped++;
+            continue;
+        }
+        parts.push(block);
+        used += block.length;
+        included++;
+    }
+    return { text: parts.join('\n\n'), included, skipped };
+}
+
+
+/***/ }),
+
 /***/ 5301:
 /***/ ((__unused_webpack_module, exports) => {
 
@@ -35538,8 +35611,8 @@ function assembleSystemPrompt(texts) {
         '# Few-shot 范例\n\n' + exampleBlock,
     ].join('\n\n---\n\n');
 }
-function assembleUserPrompt(metadata, diff) {
-    return [
+function assembleUserPrompt(metadata, diff, filesText) {
+    const sections = [
         `# 待评审的 PR`,
         `标题：${metadata.title}`,
         `描述：\n${metadata.body || '(无描述)'}`,
@@ -35547,8 +35620,12 @@ function assembleUserPrompt(metadata, diff) {
         '```diff',
         diff,
         '```',
-        `请按系统提示词中的输出格式产出：1) PR 变更总结（changeSummary）；2) 整体风险等级（overallRisk）；3) 逐条风险识别与 Review 建议（findings）。`,
-    ].join('\n\n');
+    ];
+    if (filesText) {
+        sections.push(`# 被改动文件的完整内容（用于理解 diff 之外的上下文）`, filesText);
+    }
+    sections.push(`请按系统提示词中的输出格式产出：1) PR 变更总结（changeSummary）；2) 整体风险等级（overallRisk）；3) 逐条风险识别与 Review 建议（findings）。`);
+    return sections.join('\n\n');
 }
 
 
@@ -35561,7 +35638,13 @@ function assembleUserPrompt(metadata, diff) {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.review = review;
 const prompt_js_1 = __nccwpck_require__(5301);
+const context_js_1 = __nccwpck_require__(8480);
 const schema_js_1 = __nccwpck_require__(2032);
+/** Context budgets (chars). The diff is the primary signal and is kept (capped);
+ * changed-file contents fill the remaining budget. ~chars/3-4 ≈ tokens. */
+const DIFF_CHAR_CAP = 60_000;
+const FILES_CHAR_BUDGET = 40_000;
+const MAX_FILES_TO_READ = 40;
 /**
  * The trigger-agnostic core: gather context → call the LLM → validate the
  * structured result. Knows nothing about GitHub, Actions, or transport. Both
@@ -35569,8 +35652,18 @@ const schema_js_1 = __nccwpck_require__(2032);
  */
 async function review(deps, prompts) {
     const diff = await deps.pr.getDiff();
+    // Read the full contents of the changed files so the model sees more than the
+    // diff hunks (their untouched methods, same-file type defs, etc.).
+    const changedFiles = (0, context_js_1.extractChangedFiles)(diff).slice(0, MAX_FILES_TO_READ);
+    const loaded = [];
+    for (const path of changedFiles) {
+        const content = await deps.pr.readFile(path);
+        if (content !== null)
+            loaded.push({ path, content });
+    }
+    const filesBlock = (0, context_js_1.assembleFilesBlock)(loaded, FILES_CHAR_BUDGET);
     const system = (0, prompt_js_1.assembleSystemPrompt)(prompts);
-    const user = (0, prompt_js_1.assembleUserPrompt)(deps.pr.metadata, diff);
+    const user = (0, prompt_js_1.assembleUserPrompt)(deps.pr.metadata, (0, context_js_1.truncate)(diff, DIFF_CHAR_CAP).text, filesBlock.text);
     const raw = await deps.llm.generateStructured({
         system,
         user,
