@@ -40,11 +40,13 @@ export const DIMENSIONS: Dimension[] = [
   {
     id: 'memory',
     title: '内存管理与生命周期',
+    exampleFile: 'memory-pool-use-after-free.md',
     keywords: ['unsafe', 'sync.pool', 'buffer', '内存', 'alloc', 'free(', '复用', '[]byte'],
   },
   {
     id: 'lock',
     title: '锁与隔离级别',
+    exampleFile: 'lock-ordering-deadlock.md',
     keywords: ['lock(', 'unlock', 'rlock', 'runlock', 'mvcc', 'isolation', '隔离', '事务', 'transaction', 'deadlock', '死锁'],
   },
   {
@@ -56,26 +58,31 @@ export const DIMENSIONS: Dimension[] = [
   {
     id: 'schema',
     title: 'Schema 演进与迁移',
+    exampleFile: 'schema-online-migration.md',
     keywords: ['schema', 'alter', 'migrat', '迁移', '表结构', 'column', 'ddl'],
   },
   {
     id: 'performance',
     title: '热路径性能',
+    exampleFile: 'performance-hot-path-alloc.md',
     keywords: ['index', '索引', 'scan', '热路径', 'hot path', 'benchmark', 'cache', '缓存', '批处理', 'batch'],
   },
   {
     id: 'resource',
     title: '资源与泄漏',
+    exampleFile: 'resource-goroutine-leak.md',
     keywords: ['defer ', 'close()', '.close(', 'context', 'ctx', '句柄', 'connection', '泄漏', 'leak'],
   },
   {
     id: 'error',
     title: '错误处理与崩溃安全',
+    exampleFile: 'error-swallowed-fsync.md',
     keywords: ['panic', 'recover', 'err !=', 'err ==', '_ =', 'partial', '吞'],
   },
   {
     id: 'compatibility',
     title: '接口与兼容契约',
+    exampleFile: 'compatibility-wire-format.md',
     keywords: ['proto', 'rpc', 'grpc', 'api', '协议', 'config', '兼容', 'version', '版本'],
   },
 ];
