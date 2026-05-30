@@ -20,7 +20,8 @@ function fakePr(overrides: Partial<PrContext> = {}): PrContext {
 }
 
 const validResult = {
-  summary: '一条并发问题',
+  changeSummary: '在块缓存读路径上新增命中计数',
+  overallRisk: '高',
   findings: [
     {
       file: 'cache/block.go',
@@ -50,7 +51,8 @@ describe('review (core orchestrator)', () => {
     const result = await review(deps, prompts);
     expect(result.findings).toHaveLength(1);
     expect(result.findings[0]?.type).toBe('并发');
-    expect(result.summary).toBe('一条并发问题');
+    expect(result.changeSummary).toContain('命中计数');
+    expect(result.overallRisk).toBe('高');
   });
 
   it('passes the diff and assembled prompts to the LLM', async () => {

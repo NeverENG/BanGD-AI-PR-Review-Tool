@@ -17,12 +17,23 @@ function formatFinding(f: Finding, index: number): string {
   ].join('\n\n');
 }
 
+const RISK_EMOJI: Record<ReviewResult['overallRisk'], string> = {
+  高: '🔴',
+  中: '🟡',
+  低: '🟢',
+};
+
 /** Render a ReviewResult as the Markdown body of a PR comment. Pure function. */
 export function formatReviewComment(result: ReviewResult): string {
   const header = '## 🐯 BanGD 数据库内核评审';
+  const overview = [
+    `**整体风险**：${RISK_EMOJI[result.overallRisk]} ${result.overallRisk}`,
+    `**变更总结**：${result.changeSummary}`,
+  ].join('\n\n');
+
   if (result.findings.length === 0) {
-    return `${header}\n\n${result.summary || '未发现需要从架构层面改进的问题。'}`;
+    return `${header}\n\n${overview}\n\n未发现需要从架构层面改进的问题。`;
   }
   const body = result.findings.map((f, i) => formatFinding(f, i)).join('\n\n---\n\n');
-  return `${header}\n\n${result.summary}\n\n---\n\n${body}`;
+  return `${header}\n\n${overview}\n\n---\n\n${body}`;
 }

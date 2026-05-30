@@ -39,8 +39,15 @@ export const FindingSchema = z.object({
 });
 export type Finding = z.infer<typeof FindingSchema>;
 
+export const OverallRiskSchema = z.enum(['高', '中', '低']);
+export type OverallRisk = z.infer<typeof OverallRiskSchema>;
+
 export const ReviewResultSchema = z.object({
-  summary: z.string(),
+  /** PR 变更总结：这个 PR 从数据库架构视角改了什么、动机是什么。 */
+  changeSummary: z.string().min(1),
+  /** 整体风险等级，用于 triage 与使用体验。 */
+  overallRisk: OverallRiskSchema,
+  /** 风险代码识别 + 每条的 Review 建议（架构级方案）。 */
   findings: z.array(FindingSchema),
 });
 export type ReviewResult = z.infer<typeof ReviewResultSchema>;
@@ -54,9 +61,10 @@ export type ReviewResult = z.infer<typeof ReviewResultSchema>;
 export const reviewResultJsonSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['summary', 'findings'],
+  required: ['changeSummary', 'overallRisk', 'findings'],
   properties: {
-    summary: { type: 'string' },
+    changeSummary: { type: 'string' },
+    overallRisk: { type: 'string', enum: OverallRiskSchema.options },
     findings: {
       type: 'array',
       items: {

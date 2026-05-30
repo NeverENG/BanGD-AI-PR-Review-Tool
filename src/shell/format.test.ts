@@ -15,9 +15,15 @@ const finding = {
 
 describe('formatReviewComment', () => {
   it('renders each finding with the four-part structure and location', () => {
-    const result: ReviewResult = { summary: '发现一处并发隐患', findings: [finding] };
+    const result: ReviewResult = {
+      changeSummary: '在读路径新增命中计数',
+      overallRisk: '高',
+      findings: [finding],
+    };
     const md = formatReviewComment(result);
     expect(md).toContain('BanGD');
+    expect(md).toContain('变更总结');
+    expect(md).toContain('整体风险');
     expect(md).toContain('cache/block.go:12');
     expect(md).toContain('问题根因');
     expect(md).toContain('为什么低级解法不够');
@@ -28,14 +34,15 @@ describe('formatReviewComment', () => {
 
   it('omits the line number when line is null', () => {
     const result: ReviewResult = {
-      summary: 's',
+      changeSummary: 's',
+      overallRisk: '中',
       findings: [{ ...finding, line: null }],
     };
     expect(formatReviewComment(result)).toContain('`cache/block.go`');
   });
 
   it('renders a clean message when there are no findings', () => {
-    const md = formatReviewComment({ summary: '', findings: [] });
+    const md = formatReviewComment({ changeSummary: '小改动', overallRisk: '低', findings: [] });
     expect(md).toContain('未发现需要从架构层面改进的问题');
   });
 });

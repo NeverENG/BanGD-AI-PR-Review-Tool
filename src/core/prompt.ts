@@ -36,6 +36,6 @@ export function assembleUserPrompt(metadata: PrMetadata, diff: string): string {
     '```diff',
     diff,
     '```',
-    `请按系统提示词中的输出格式，逐条给出 finding。`,
+    `请按系统提示词中的输出格式产出：1) PR 变更总结（changeSummary）；2) 整体风险等级（overallRisk）；3) 逐条风险识别与 Review 建议（findings）。`,
   ].join('\n\n');
 }

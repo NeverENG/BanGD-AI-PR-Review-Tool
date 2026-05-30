@@ -35547,7 +35547,7 @@ function assembleUserPrompt(metadata, diff) {
         '```diff',
         diff,
         '```',
-        `请按系统提示词中的输出格式，逐条给出 finding。`,
+        `请按系统提示词中的输出格式产出：1) PR 变更总结（changeSummary）；2) 整体风险等级（overallRisk）；3) 逐条风险识别与 Review 建议（findings）。`,
     ].join('\n\n');
 }
 
@@ -35589,7 +35589,7 @@ async function review(deps, prompts) {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.reviewResultJsonSchema = exports.ReviewResultSchema = exports.FindingSchema = exports.FindingTypeSchema = exports.SeveritySchema = void 0;
+exports.reviewResultJsonSchema = exports.ReviewResultSchema = exports.OverallRiskSchema = exports.FindingSchema = exports.FindingTypeSchema = exports.SeveritySchema = void 0;
 const zod_1 = __nccwpck_require__(924);
 /**
  * The shape of a single review finding. Types are inferred from these Zod
@@ -35623,8 +35623,13 @@ exports.FindingSchema = zod_1.z.object({
     /** Honest cost/benefit of the proposed solution. */
     tradeoffs: zod_1.z.string().min(1),
 });
+exports.OverallRiskSchema = zod_1.z.enum(['高', '中', '低']);
 exports.ReviewResultSchema = zod_1.z.object({
-    summary: zod_1.z.string(),
+    /** PR 变更总结：这个 PR 从数据库架构视角改了什么、动机是什么。 */
+    changeSummary: zod_1.z.string().min(1),
+    /** 整体风险等级，用于 triage 与使用体验。 */
+    overallRisk: exports.OverallRiskSchema,
+    /** 风险代码识别 + 每条的 Review 建议（架构级方案）。 */
     findings: zod_1.z.array(exports.FindingSchema),
 });
 /**
@@ -35636,9 +35641,10 @@ exports.ReviewResultSchema = zod_1.z.object({
 exports.reviewResultJsonSchema = {
     type: 'object',
     additionalProperties: false,
-    required: ['summary', 'findings'],
+    required: ['changeSummary', 'overallRisk', 'findings'],
     properties: {
-        summary: { type: 'string' },
+        changeSummary: { type: 'string' },
+        overallRisk: { type: 'string', enum: exports.OverallRiskSchema.options },
         findings: {
             type: 'array',
             items: {
@@ -35785,14 +35791,23 @@ function formatFinding(f, index) {
         `**代价/收益**：${f.tradeoffs}`,
     ].join('\n\n');
 }
+const RISK_EMOJI = {
+    高: '🔴',
+    中: '🟡',
+    低: '🟢',
+};
 /** Render a ReviewResult as the Markdown body of a PR comment. Pure function. */
 function formatReviewComment(result) {
     const header = '## 🐯 BanGD 数据库内核评审';
+    const overview = [
+        `**整体风险**：${RISK_EMOJI[result.overallRisk]} ${result.overallRisk}`,
+        `**变更总结**：${result.changeSummary}`,
+    ].join('\n\n');
     if (result.findings.length === 0) {
-        return `${header}\n\n${result.summary || '未发现需要从架构层面改进的问题。'}`;
+        return `${header}\n\n${overview}\n\n未发现需要从架构层面改进的问题。`;
     }
     const body = result.findings.map((f, i) => formatFinding(f, i)).join('\n\n---\n\n');
-    return `${header}\n\n${result.summary}\n\n---\n\n${body}`;
+    return `${header}\n\n${overview}\n\n---\n\n${body}`;
 }
 
 
