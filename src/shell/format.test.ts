@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { formatSummaryComment, formatIssueBody, formatIssueTitle, type CommentItem } from './format.js';
+import {
+  formatSummaryComment,
+  formatIssueBody,
+  formatIssueTitle,
+  formatDegradedComment,
+  type CommentItem,
+} from './format.js';
 import { groupFindings } from '../core/publish.js';
 import type { ReviewResult } from '../core/schema.js';
 import { SUMMARY_MARKER } from './markers.js';
@@ -59,6 +65,14 @@ describe('formatSummaryComment', () => {
   it('renders a clean message with no findings', () => {
     const md = formatSummaryComment({ changeSummary: '小改动', overallRisk: '低', findings: [] }, []);
     expect(md).toContain('未发现需要从架构层面改进的问题');
+  });
+
+  it('formatDegradedComment carries the marker, a non-blocking note, and the raw snippet', () => {
+    const md = formatDegradedComment('RAW_OUTPUT_X');
+    expect(md).toContain(SUMMARY_MARKER);
+    expect(md).toContain('未能生成有效的结构化评审');
+    expect(md).toContain('不阻塞合入');
+    expect(md).toContain('RAW_OUTPUT_X');
   });
 
   it('appends the footer (e.g. token usage) when provided', () => {

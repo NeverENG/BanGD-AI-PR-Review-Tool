@@ -44,6 +44,21 @@ export function formatIssueBody(group: ProblemGroup, prNumber: number): string {
   ].join('\n\n');
 }
 
+/**
+ * Comment used when the model failed to produce a valid structured review.
+ * Non-blocking: tells the author it can be retried / use a stronger model, and
+ * includes the raw output snippet for debugging. Carries the summary marker so
+ * it upserts the single comment like a normal review.
+ */
+export function formatDegradedComment(rawSnippet: string): string {
+  return [
+    SUMMARY_MARKER,
+    '## 🐯 BanGD 数据库内核评审',
+    '⚠️ 本次未能生成有效的结构化评审（模型返回的内容无法解析）。**不阻塞合入**，可重试，或改用更强的模型。',
+    `<details><summary>模型原始输出片段（调试用）</summary>\n\n\`\`\`\n${rawSnippet}\n\`\`\`\n</details>`,
+  ].join('\n\n');
+}
+
 export interface CommentItem {
   group: ProblemGroup;
   /** Issue URL, or null if the issue couldn't be created (inline fallback). */
