@@ -1,0 +1,9 @@
+node_modules/
+build/
+*.log
+.env
+.DS_Store
+
+# Note: dist/ is intentionally NOT ignored. A JS GitHub Action runs the
+# committed bundled output, so dist/ (produced by `npm run build:action`)
+# must be committed. See CLAUDE.md.
