@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { loadPromptTexts } from './prompts.js';
-import { ALL_DIMENSION_IDS } from '../core/dimensions.js';
+import { ALL_DIMENSION_IDS, DIMENSIONS } from '../core/dimensions.js';
 
 describe('loadPromptTexts', () => {
   it('loads the system prompt and a rubric fragment for every dimension', async () => {
@@ -12,11 +12,12 @@ describe('loadPromptTexts', () => {
     expect(texts.rubric.concurrency).toContain('并发');
   });
 
-  it('loads examples for the dimensions that have one', async () => {
+  it('loads an example for every dimension that declares one', async () => {
     const texts = await loadPromptTexts();
+    for (const d of DIMENSIONS) {
+      if (d.exampleFile) expect(texts.examples[d.id]).toBeTruthy();
+    }
     expect(texts.examples.concurrency).toContain('双表');
-    expect(texts.examples.storage).toContain('WAL');
-    // A dimension without an exemplar has no entry.
-    expect(texts.examples.schema).toBeUndefined();
+    expect(texts.examples.schema).toContain('影子表');
   });
 });
