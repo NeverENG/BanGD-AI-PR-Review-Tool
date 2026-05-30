@@ -5,6 +5,7 @@ import type { PromptTexts } from './prompt.js';
 import { ALL_DIMENSION_IDS, type DimensionId } from './dimensions.js';
 import { InvalidModelOutputError } from './errors.js';
 import { RELATED_PLAN_SCHEMA } from './related.js';
+import { VERDICT_SCHEMA } from './verify.js';
 import { reviewResultJsonSchema, FindingSchema, ReviewResultSchema } from './schema.js';
 
 const prompts: PromptTexts = {
@@ -79,6 +80,20 @@ describe('review (core orchestrator)', () => {
     expect(result.overallRisk).toBe('高');
     expect(dimensions).toContain('concurrency');
     expect(relatedFiles).toEqual([]);
+  });
+
+  it('runs adversarial verification and drops majority-refuted findings', async () => {
+    const llm: LlmClient = {
+      generateStructured: (request: LlmRequest) => {
+        if (request.outputSchema === RELATED_PLAN_SCHEMA) return Promise.resolve({ paths: [] });
+        if (request.outputSchema === VERDICT_SCHEMA) return Promise.resolve({ refuted: true, reason: 'x' });
+        return Promise.resolve(validResult);
+      },
+    };
+    const { result, droppedFindings } = await review({ llm, pr: fakePr() }, prompts, { verifyVotes: 1 });
+    expect(result.findings).toHaveLength(0);
+    expect(droppedFindings).toHaveLength(1);
+    expect(droppedFindings[0]?.file).toBe('cache/block.go');
   });
 
   it('sends only the selected dimension rubric + matching example', async () => {

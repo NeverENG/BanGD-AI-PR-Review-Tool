@@ -7,12 +7,13 @@ import {
   type LoadedFile,
 } from './context.js';
 import { gatherRelatedFiles } from './related.js';
+import { verifyFindings } from './verify.js';
 import { selectDimensionsHeuristic, sanitizeDimensions } from './router.js';
 import { ALL_DIMENSION_IDS, DIMENSIONS, type DimensionId } from './dimensions.js';
 import { withRetry } from './retry.js';
 import { InvalidModelOutputError } from './errors.js';
 import { ZodError } from 'zod';
-import { ReviewResultSchema, reviewResultJsonSchema, type ReviewResult } from './schema.js';
+import { ReviewResultSchema, reviewResultJsonSchema, type ReviewResult, type Finding } from './schema.js';
 
 /** Context budgets (chars). The diff is the primary signal and is kept (capped);
  * changed-file contents fill the remaining budget. ~chars/3-4 ≈ tokens. */
@@ -39,6 +40,11 @@ export interface ReviewDeps {
   pr: PrContext;
 }
 
+export interface ReviewOptions {
+  /** Adversarial refuters per finding (DESIGN §六.3). 0 disables the pass. */
+  verifyVotes?: number;
+}
+
 export interface ReviewOutcome {
   result: ReviewResult;
   /** Which rubric dimensions were sent (for observability / token transparency). */
@@ -46,6 +52,9 @@ export interface ReviewOutcome {
   /** Untouched related files the planner pulled for architecture-level context
    * (for observability — demonstrates the agentic-reading lever working). */
   relatedFiles: string[];
+  /** Findings dropped by the adversarial verification pass as likely false
+   * positives (for observability / 误报控制 transparency). */
+  droppedFindings: Finding[];
 }
 
 /**
@@ -54,7 +63,11 @@ export interface ReviewOutcome {
  * (heuristic router, LLM fallback when nothing matches), to cut tokens while
  * keeping review quality on the dimensions that apply.
  */
-export async function review(deps: ReviewDeps, prompts: PromptTexts): Promise<ReviewOutcome> {
+export async function review(
+  deps: ReviewDeps,
+  prompts: PromptTexts,
+  options: ReviewOptions = {},
+): Promise<ReviewOutcome> {
   const diff = await deps.pr.getDiff();
 
   const changedFiles = extractChangedFiles(diff).slice(0, MAX_FILES_TO_READ);
@@ -96,8 +109,9 @@ export async function review(deps: ReviewDeps, prompts: PromptTexts): Promise<Re
   // If every attempt yields unparseable output, surface InvalidModelOutputError
   // carrying the raw output so the shell can log it and degrade gracefully.
   let lastRaw: unknown;
+  let result: ReviewResult;
   try {
-    const result = await withRetry(async () => {
+    result = await withRetry(async () => {
       lastRaw = await deps.llm.generateStructured({
         system,
         user,
@@ -105,11 +119,24 @@ export async function review(deps: ReviewDeps, prompts: PromptTexts): Promise<Re
       });
       return ReviewResultSchema.parse(lastRaw);
     }, GENERATE_ATTEMPTS);
-    return { result, dimensions, relatedFiles };
   } catch (error) {
     if (error instanceof ZodError) throw new InvalidModelOutputError(lastRaw);
     throw error;
   }
+
+  // Adversarial verification: drop likely false positives by majority refute
+  // (no-op when verifyVotes <= 0 or there are no findings — zero extra calls).
+  const { kept, dropped } = await verifyFindings(deps.llm, result.findings, {
+    changeSummary: result.changeSummary,
+    diff: cappedDiff,
+  }, options.verifyVotes ?? 0);
+
+  return {
+    result: { ...result, findings: kept },
+    dimensions,
+    relatedFiles,
+    droppedFindings: dropped,
+  };
 }
 
 /**

@@ -35951,6 +35951,7 @@ exports.review = review;
 const prompt_js_1 = __nccwpck_require__(5301);
 const context_js_1 = __nccwpck_require__(8480);
 const related_js_1 = __nccwpck_require__(5640);
+const verify_js_1 = __nccwpck_require__(7190);
 const router_js_1 = __nccwpck_require__(2086);
 const dimensions_js_1 = __nccwpck_require__(8094);
 const retry_js_1 = __nccwpck_require__(7253);
@@ -35981,7 +35982,7 @@ const ROUTING_SCHEMA = {
  * (heuristic router, LLM fallback when nothing matches), to cut tokens while
  * keeping review quality on the dimensions that apply.
  */
-async function review(deps, prompts) {
+async function review(deps, prompts, options = {}) {
     const diff = await deps.pr.getDiff();
     const changedFiles = (0, context_js_1.extractChangedFiles)(diff).slice(0, MAX_FILES_TO_READ);
     const loaded = [];
@@ -36014,8 +36015,9 @@ async function review(deps, prompts) {
     // If every attempt yields unparseable output, surface InvalidModelOutputError
     // carrying the raw output so the shell can log it and degrade gracefully.
     let lastRaw;
+    let result;
     try {
-        const result = await (0, retry_js_1.withRetry)(async () => {
+        result = await (0, retry_js_1.withRetry)(async () => {
             lastRaw = await deps.llm.generateStructured({
                 system,
                 user,
@@ -36023,13 +36025,24 @@ async function review(deps, prompts) {
             });
             return schema_js_1.ReviewResultSchema.parse(lastRaw);
         }, GENERATE_ATTEMPTS);
-        return { result, dimensions, relatedFiles };
     }
     catch (error) {
         if (error instanceof zod_1.ZodError)
             throw new errors_js_1.InvalidModelOutputError(lastRaw);
         throw error;
     }
+    // Adversarial verification: drop likely false positives by majority refute
+    // (no-op when verifyVotes <= 0 or there are no findings — zero extra calls).
+    const { kept, dropped } = await (0, verify_js_1.verifyFindings)(deps.llm, result.findings, {
+        changeSummary: result.changeSummary,
+        diff: cappedDiff,
+    }, options.verifyVotes ?? 0);
+    return {
+        result: { ...result, findings: kept },
+        dimensions,
+        relatedFiles,
+        droppedFindings: dropped,
+    };
 }
 /**
  * Pick the rubric dimensions to send: heuristic first; if it matches nothing,
@@ -36250,6 +36263,95 @@ function formatUsage(u) {
 
 /***/ }),
 
+/***/ 7190:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.VERDICT_SCHEMA = void 0;
+exports.verifyFinding = verifyFinding;
+exports.verifyFindings = verifyFindings;
+const context_js_1 = __nccwpck_require__(8480);
+/** JSON Schema for one refuter's verdict. */
+exports.VERDICT_SCHEMA = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['refuted', 'reason'],
+    properties: {
+        refuted: { type: 'boolean' },
+        reason: { type: 'string' },
+    },
+};
+/** Cap on the change context handed to each refuter (chars). */
+const VERIFY_DIFF_CAP = 30_000;
+const REFUTER_SYSTEM = [
+    '你是一个挑剔的资深数据库内核评审「复核者」。',
+    '下面是另一位评审者对某 PR 提出的一条问题。请独立、对抗式地判断：',
+    '这条问题是否站得住脚——即「确实是本次 diff 引入的、真实的架构级隐患」，',
+    '还是一个**误报**（无 diff 依据 / 与改动无关 / 夸大严重度 / 把正常代码误判为隐患 / 推理链断裂）。',
+    '只依据给到的 diff 与变更总结判断，不要臆测 diff 之外的事实。',
+    '若证据不足以确认它是一个真实的、由该 diff 引入的问题，请判为 refuted=true。',
+    '在 reason 里用一句话说明你判定成立或误报的依据。',
+].join('\n');
+function refuterUser(finding, ctx) {
+    return [
+        '# 变更总结',
+        ctx.changeSummary,
+        '# Diff',
+        '```diff',
+        (0, context_js_1.truncate)(ctx.diff, VERIFY_DIFF_CAP).text,
+        '```',
+        '# 待复核的问题',
+        `文件：${finding.file}${finding.line === null ? '' : `:${finding.line}`}`,
+        `类型：${finding.type}｜严重度：${finding.severity}`,
+        `问题根因：${finding.rootCause}`,
+        `为什么低级解法不够：${finding.whyLowEffortInsufficient}`,
+        `架构级方案：${finding.architecturalSolution}`,
+        `代价/收益：${finding.tradeoffs}`,
+        '请判断这条问题是否为误报（refuted）。',
+    ].join('\n\n');
+}
+/** Run one refuter; a failed/unparseable vote counts as NOT refuted. */
+async function refuteOnce(llm, finding, ctx) {
+    try {
+        const raw = await llm.generateStructured({
+            system: REFUTER_SYSTEM,
+            user: refuterUser(finding, ctx),
+            outputSchema: exports.VERDICT_SCHEMA,
+        });
+        return raw.refuted === true;
+    }
+    catch {
+        return false;
+    }
+}
+/**
+ * Verify one finding with `votes` independent refuters. Dropped only on a strict
+ * majority refute (refutedCount > votes/2), so a single skeptic can't veto a real
+ * finding and a tie keeps the finding.
+ */
+async function verifyFinding(llm, finding, ctx, votes) {
+    const verdicts = await Promise.all(Array.from({ length: votes }, () => refuteOnce(llm, finding, ctx)));
+    const refuted = verdicts.filter(Boolean).length;
+    return refuted > votes / 2; // true => drop (majority refuted)
+}
+/**
+ * Adversarially verify every finding. With `votes <= 0` (or no findings) this is
+ * a no-op that makes zero LLM calls and keeps all findings unchanged.
+ */
+async function verifyFindings(llm, findings, ctx, votes) {
+    if (votes <= 0 || findings.length === 0)
+        return { kept: findings, dropped: [] };
+    const dropFlags = await Promise.all(findings.map((f) => verifyFinding(llm, f, ctx, votes)));
+    const kept = [];
+    const dropped = [];
+    findings.forEach((f, i) => (dropFlags[i] ? dropped : kept).push(f));
+    return { kept, dropped };
+}
+
+
+/***/ }),
+
 /***/ 250:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -36308,6 +36410,8 @@ async function run() {
     const githubToken = core.getInput('github_token', { required: true });
     const model = core.getInput('model') || undefined;
     const baseUrl = core.getInput('base_url') || undefined;
+    const verifyVotesRaw = parseInt(core.getInput('verify_votes'), 10);
+    const verifyVotes = Number.isFinite(verifyVotesRaw) && verifyVotesRaw >= 0 ? verifyVotesRaw : 3;
     const pr = github.context.payload.pull_request;
     if (!pr) {
         core.setFailed('BanGD 只能在 pull_request 事件上运行（找不到 PR 上下文）。');
@@ -36336,7 +36440,7 @@ async function run() {
     const publisher = new github_js_1.GithubPublisher(octokit, { owner, repo, pullNumber: pr.number });
     let reviewed;
     try {
-        reviewed = await (0, review_js_1.review)({ llm, pr: prContext }, prompts);
+        reviewed = await (0, review_js_1.review)({ llm, pr: prContext }, prompts, { verifyVotes });
     }
     catch (error) {
         if (error instanceof errors_js_1.InvalidModelOutputError) {
@@ -36351,14 +36455,19 @@ async function run() {
         }
         throw error;
     }
-    const { result, dimensions, relatedFiles } = reviewed;
+    const { result, dimensions, relatedFiles, droppedFindings } = reviewed;
     const usage = llm.usage;
     const relatedNote = relatedFiles.length > 0 ? `｜补充阅读周边文件 [${relatedFiles.join(', ')}]` : '';
-    const footer = `本次评审消耗 token：${(0, usage_js_1.formatUsage)(usage)}｜维度 [${dimensions.join(', ')}]${relatedNote}`;
+    const verifyNote = verifyVotes > 0
+        ? `｜对抗式复核 ${verifyVotes} 票/条，过滤疑似误报 ${droppedFindings.length} 条`
+        : '';
+    const footer = `本次评审消耗 token：${(0, usage_js_1.formatUsage)(usage)}｜维度 [${dimensions.join(', ')}]${relatedNote}${verifyNote}`;
     const published = await (0, publish_js_1.publishReview)(publisher, result, pr.number, footer);
     core.setOutput('finding_count', result.findings.length);
     core.setOutput('total_tokens', (0, usage_js_1.totalTokens)(usage));
-    core.info(`BanGD 评审完成，维度=[${dimensions.join(', ')}]，共 ${result.findings.length} 条 finding；` +
+    core.setOutput('dropped_count', droppedFindings.length);
+    core.info(`BanGD 评审完成，维度=[${dimensions.join(', ')}]，共 ${result.findings.length} 条 finding` +
+        `（对抗式复核过滤 ${droppedFindings.length} 条疑似误报）；` +
         `补充阅读周边文件 ${relatedFiles.length} 个${relatedFiles.length > 0 ? ` [${relatedFiles.join(', ')}]` : ''}；` +
         `新建 Issue ${published.created} 个，复用 ${published.reused} 个${published.degraded ? '（部分降级为内联）' : ''}。`);
     core.info(`Token 用量：${(0, usage_js_1.formatUsage)(usage)}`);
