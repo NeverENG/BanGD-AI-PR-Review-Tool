@@ -2,19 +2,25 @@ import { describe, it, expect, vi } from 'vitest';
 import { review, type ReviewDeps } from './review.js';
 import type { LlmClient, LlmRequest, PrContext } from './ports.js';
 import type { PromptTexts } from './prompt.js';
+import { ALL_DIMENSION_IDS, type DimensionId } from './dimensions.js';
 import { reviewResultJsonSchema, FindingSchema, ReviewResultSchema } from './schema.js';
 
 const prompts: PromptTexts = {
   systemPrompt: 'SYSTEM',
-  rubric: 'RUBRIC',
-  examples: ['EXAMPLE_A', 'EXAMPLE_B'],
+  rubric: Object.fromEntries(
+    ALL_DIMENSION_IDS.map((id) => [id, `RUBRIC_${id}`]),
+  ) as Record<DimensionId, string>,
+  examples: { concurrency: 'EXAMPLE_CONCURRENCY', storage: 'EXAMPLE_STORAGE' },
 };
 
+// Contains a concurrency keyword (`sync.`) so the heuristic router selects the
+// concurrency dimension without an LLM-fallback call.
 const SAMPLE_DIFF = [
   'diff --git a/cache/block.go b/cache/block.go',
   '--- a/cache/block.go',
   '+++ b/cache/block.go',
   '@@ -1 +1 @@',
+  '+\tc.hits++ // 计数, 读路径无 sync.Mutex 保护',
 ].join('\n');
 
 function fakePr(overrides: Partial<PrContext> = {}): PrContext {
@@ -56,27 +62,28 @@ function fakeLlm(output: unknown, capture?: (r: LlmRequest) => void): LlmClient 
 describe('review (core orchestrator)', () => {
   it('returns a validated ReviewResult from the model output', async () => {
     const deps: ReviewDeps = { llm: fakeLlm(validResult), pr: fakePr() };
-    const result = await review(deps, prompts);
+    const { result, dimensions } = await review(deps, prompts);
     expect(result.findings).toHaveLength(1);
     expect(result.findings[0]?.type).toBe('并发');
     expect(result.changeSummary).toContain('命中计数');
     expect(result.overallRisk).toBe('高');
+    expect(dimensions).toContain('concurrency');
   });
 
-  it('passes the diff and assembled prompts to the LLM', async () => {
+  it('sends only the selected dimension rubric + matching example', async () => {
     let seen: LlmRequest | undefined;
-    const getDiff = vi.fn(() => Promise.resolve('THE_DIFF'));
     const deps: ReviewDeps = {
       llm: fakeLlm(validResult, (r) => (seen = r)),
-      pr: fakePr({ getDiff }),
+      pr: fakePr(),
     };
-    await review(deps, prompts);
+    const { dimensions } = await review(deps, prompts);
 
-    expect(getDiff).toHaveBeenCalledOnce();
     expect(seen?.system).toContain('SYSTEM');
-    expect(seen?.system).toContain('RUBRIC');
-    expect(seen?.system).toContain('EXAMPLE_A');
-    expect(seen?.user).toContain('THE_DIFF');
+    expect(seen?.system).toContain('RUBRIC_concurrency');
+    expect(seen?.system).toContain('EXAMPLE_CONCURRENCY');
+    // A dimension that wasn't selected must not be included.
+    expect(dimensions).not.toContain('schema');
+    expect(seen?.system).not.toContain('RUBRIC_schema');
     expect(seen?.user).toContain('add hit counter');
     expect(seen?.outputSchema).toBe(reviewResultJsonSchema);
   });
@@ -97,6 +104,19 @@ describe('review (core orchestrator)', () => {
     expect(seen?.user).toContain('FULL FILE BODY');
   });
 
+  it('falls back to the LLM router, then all dimensions, when heuristics miss', async () => {
+    let seen: DimensionId[] = [];
+    // A diff with no dimension keywords; the fake LLM returns no routing dims,
+    // so selection must fall back to all dimensions.
+    const deps: ReviewDeps = {
+      llm: fakeLlm(validResult),
+      pr: fakePr({ getDiff: () => Promise.resolve('+++ b/x.txt\n+hello world') }),
+    };
+    const outcome = await review(deps, prompts);
+    seen = outcome.dimensions;
+    expect(seen).toEqual(ALL_DIMENSION_IDS);
+  });
+
   it('re-generates once when the first model output is malformed', async () => {
     const bad = { summary: 'x', findings: [{ file: 'a.go', severity: 'urgent' }] };
     let calls = 0;
@@ -106,7 +126,7 @@ describe('review (core orchestrator)', () => {
         return Promise.resolve(calls === 1 ? bad : validResult);
       },
     };
-    const result = await review({ llm, pr: fakePr() }, prompts);
+    const { result } = await review({ llm, pr: fakePr() }, prompts);
     expect(calls).toBe(2);
     expect(result.overallRisk).toBe('高');
   });

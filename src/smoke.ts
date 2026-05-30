@@ -82,7 +82,8 @@ const llm = new AnthropicLlmClient({
 });
 
 console.error(`调用模型 ${model ?? 'claude-opus-4-8'}${baseURL ? ` @ ${baseURL}` : ''} ...`);
-const result = await review({ llm, pr }, prompts);
+const { result, dimensions } = await review({ llm, pr }, prompts);
 
+console.error(`选中的评审维度：[${dimensions.join(', ')}]`);
 console.log(formatReviewComment(result));
 console.log('\n--- raw ReviewResult ---\n' + JSON.stringify(result, null, 2));
