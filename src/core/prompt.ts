@@ -37,7 +37,12 @@ export function assembleSystemPrompt(
   return parts.join('\n\n---\n\n');
 }
 
-export function assembleUserPrompt(metadata: PrMetadata, diff: string, filesText: string): string {
+export function assembleUserPrompt(
+  metadata: PrMetadata,
+  diff: string,
+  filesText: string,
+  relatedText = '',
+): string {
   const sections = [
     `# 待评审的 PR`,
     `标题：${metadata.title}`,
@@ -51,6 +56,12 @@ export function assembleUserPrompt(metadata: PrMetadata, diff: string, filesText
     sections.push(
       `# 被改动文件的完整内容（用于理解 diff 之外的上下文）`,
       filesText,
+    );
+  }
+  if (relatedText) {
+    sections.push(
+      `# 周边相关代码（未被改动，按需拉取，用于架构级推理）`,
+      relatedText,
     );
   }
   sections.push(

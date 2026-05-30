@@ -67,10 +67,11 @@ export async function run(): Promise<void> {
     }
     throw error;
   }
-  const { result, dimensions } = reviewed;
+  const { result, dimensions, relatedFiles } = reviewed;
 
   const usage = llm.usage;
-  const footer = `本次评审消耗 token：${formatUsage(usage)}｜维度 [${dimensions.join(', ')}]`;
+  const relatedNote = relatedFiles.length > 0 ? `｜补充阅读周边文件 [${relatedFiles.join(', ')}]` : '';
+  const footer = `本次评审消耗 token：${formatUsage(usage)}｜维度 [${dimensions.join(', ')}]${relatedNote}`;
 
   const published = await publishReview(publisher, result, pr.number, footer);
 
@@ -78,6 +79,7 @@ export async function run(): Promise<void> {
   core.setOutput('total_tokens', totalTokens(usage));
   core.info(
     `BanGD 评审完成，维度=[${dimensions.join(', ')}]，共 ${result.findings.length} 条 finding；` +
+      `补充阅读周边文件 ${relatedFiles.length} 个${relatedFiles.length > 0 ? ` [${relatedFiles.join(', ')}]` : ''}；` +
       `新建 Issue ${published.created} 个，复用 ${published.reused} 个${published.degraded ? '（部分降级为内联）' : ''}。`,
   );
   core.info(`Token 用量：${formatUsage(usage)}`);

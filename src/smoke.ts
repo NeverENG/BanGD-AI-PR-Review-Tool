@@ -83,9 +83,10 @@ const llm = new AnthropicLlmClient({
 });
 
 console.error(`调用模型 ${model ?? 'claude-opus-4-8'}${baseURL ? ` @ ${baseURL}` : ''} ...`);
-const { result, dimensions } = await review({ llm, pr }, prompts);
+const { result, dimensions, relatedFiles } = await review({ llm, pr }, prompts);
 
 console.error(`选中的评审维度：[${dimensions.join(', ')}]`);
+console.error(`补充阅读的周边文件：[${relatedFiles.join(', ')}]`);
 
 // Simulate publishing locally (no GitHub): one group per architecture problem.
 const groups = groupFindings(result.findings, 0);
