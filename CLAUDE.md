@@ -4,7 +4,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Greenfield — tech selection is decided (below), but implementation has not started. As real code, build, and test commands land, replace the relevant sections here with concrete commands. Do not leave this as vision-only once code exists.
+MVP scaffold is in place: a trigger-agnostic review core + a GitHub Action shell, all typechecked/linted/tested. The end-to-end path (diff → core → posted comment) is wired but **not yet runnable as a published Action** — see "Known follow-ups" below.
+
+## Commands
+
+```bash
+npm install          # install deps
+npm run typecheck    # tsc --noEmit (strict)
+npm run lint         # eslint (enforces no-any)
+npm test             # vitest run (all tests)
+npm run test:watch   # vitest watch
+npx vitest run src/core/review.test.ts   # a single test file
+npm run build        # tsc -> build/
+npm run build:action # ncc bundle -> dist/index.js (for the Action; see follow-ups)
+```
+
+## Architecture (as built)
+
+The keystone is **dependency injection through two ports**, which delivers trigger-decoupling, testability, and no-`any` at once:
+
+- `src/core/` — trigger-agnostic. `review(deps, prompts)` does `gather context → call LLM → Zod-validate`. Imports neither Octokit nor `@actions/*`.
+  - `schema.ts` — Zod `Finding`/`ReviewResult`; TS types are `z.infer`-ed from them. Also a hand-written `reviewResultJsonSchema` (the tool input_schema), kept in sync with Zod by a test.
+  - `ports.ts` — `LlmClient` and `PrContext` interfaces (the injection seam). `LlmClient.generateStructured` returns `unknown`; the core owns validation.
+  - `prompt.ts` / `review.ts` — prompt assembly + orchestrator.
+- `src/shell/` — thin adapters that implement the ports. `llm.ts` (Anthropic, tool-use structured output + prompt caching), `github.ts` (Octokit `PrContext`), `format.ts` (pure `ReviewResult`→Markdown), `prompts.ts` (loads `prompts/*.md` — IO lives in the shell, core stays pure), `action.ts` (entry).
+- `action.yml` — Action metadata; runs `dist/index.js`.
+
+To add the future Probot App: write a new shell implementing the same two ports; the core is unchanged.
+
+## Known follow-ups
+
+- **Action isn't runnable until bundled.** A `node20` Action runs committed JS, not TS, and does not `npm install` at runtime. Must `npm run build:action` and **commit `dist/`** (it's intentionally not gitignored). The bundled code also can't find `prompts/*.md` via the current relative path — inline the prompt text at build time (or copy `prompts/` next to `dist/`) before relying on `loadPromptTexts()` in the Action.
+- **No evaluation corpus yet.** Before trusting architecture-level suggestions, build a set of past PRs + expert reviews and measure BanGD's agreement; iterate the rubric/examples against it.
+- **Single-pass review only.** No agentic file-reading loop yet (`PrContext.readFile` exists but the core doesn't pull surrounding code). That's the next quality lever after the corpus.
 
 ## What this project is (BanGD)
 
