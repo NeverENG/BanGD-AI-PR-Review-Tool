@@ -1,0 +1,28 @@
+# Copy this into the BanDB repo at .github/workflows/bangd.yml
+# It is GitHub (not BanGD) that triggers this on PR events — no polling,
+# no standing service. BanGD reads the diff and posts a comment via the API.
+
+name: BanGD Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read          # read the diff / file contents
+  pull-requests: write    # post the review comment
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      # No actions/checkout needed: BanGD fetches the diff and files via the
+      # GitHub API, and ships its own prompts/ + dist/ when used as `uses:`.
+      - uses: NeverENG/BanGD-AI-PR-Review-Tool@main
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          # Production: default model is claude-opus-4-8 (strongest reasoning).
+          # Temporary DeepSeek setup (verifies the pipeline, not review quality):
+          # base_url: https://api.deepseek.com/anthropic
+          # model: deepseek-chat
