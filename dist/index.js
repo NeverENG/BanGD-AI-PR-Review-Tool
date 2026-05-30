@@ -35706,6 +35706,63 @@ function assembleUserPrompt(metadata, diff, filesText) {
 
 /***/ }),
 
+/***/ 3252:
+/***/ ((__unused_webpack_module, exports) => {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.findingKey = findingKey;
+exports.fullKey = fullKey;
+exports.groupFindings = groupFindings;
+exports.partitionGroups = partitionGroups;
+/**
+ * Deterministic dedup identity for a finding. It must be byte-identical across
+ * runs so re-reviews (on each push) don't file duplicate issues — so it's
+ * computed in code from stable fields, NOT taken from the model (whose phrasing
+ * drifts). `file:type` is the only stable identity available: line numbers move
+ * and rootCause text varies. Consequence: two findings of the same type in the
+ * same file collapse to one key → one issue (errs toward anti-spam by design).
+ */
+function findingKey(finding) {
+    return `${finding.file.trim().toLowerCase()}:${finding.type}`;
+}
+/** Per-PR scoped key, so the same problem in different PRs gets distinct issues. */
+function fullKey(prNumber, finding) {
+    return `pr${prNumber}:${findingKey(finding)}`;
+}
+/** Group findings by their per-PR key, preserving first-seen order. */
+function groupFindings(findings, prNumber) {
+    const groups = new Map();
+    const order = [];
+    for (const finding of findings) {
+        const key = fullKey(prNumber, finding);
+        const existing = groups.get(key);
+        if (existing) {
+            existing.findings.push(finding);
+        }
+        else {
+            groups.set(key, { fullKey: key, findings: [finding] });
+            order.push(key);
+        }
+    }
+    return order.map((key) => groups.get(key)).filter((g) => g !== undefined);
+}
+/** Split groups into those not yet filed (fresh) and those already filed (known). */
+function partitionGroups(groups, existingKeys) {
+    const fresh = [];
+    const known = [];
+    for (const group of groups) {
+        if (existingKeys.has(group.fullKey))
+            known.push(group);
+        else
+            fresh.push(group);
+    }
+    return { fresh, known };
+}
+
+
+/***/ }),
+
 /***/ 7253:
 /***/ ((__unused_webpack_module, exports) => {
 
@@ -36015,7 +36072,7 @@ const review_js_1 = __nccwpck_require__(7935);
 const github_js_1 = __nccwpck_require__(4799);
 const llm_js_1 = __nccwpck_require__(5653);
 const prompts_js_1 = __nccwpck_require__(5989);
-const format_js_1 = __nccwpck_require__(6951);
+const publish_js_1 = __nccwpck_require__(1101);
 function readString(obj, key) {
     const value = obj[key];
     return typeof value === 'string' ? value : '';
@@ -36051,14 +36108,11 @@ async function run() {
         ...(baseUrl ? { baseURL: baseUrl } : {}),
     });
     const { result, dimensions } = await (0, review_js_1.review)({ llm, pr: prContext }, prompts);
-    await octokit.rest.issues.createComment({
-        owner,
-        repo,
-        issue_number: pr.number,
-        body: (0, format_js_1.formatReviewComment)(result),
-    });
+    const publisher = new github_js_1.GithubPublisher(octokit, { owner, repo, pullNumber: pr.number });
+    const published = await (0, publish_js_1.publishReview)(publisher, result, pr.number);
     core.setOutput('finding_count', result.findings.length);
-    core.info(`BanGD 评审完成，维度=[${dimensions.join(', ')}]，共 ${result.findings.length} 条 finding。`);
+    core.info(`BanGD 评审完成，维度=[${dimensions.join(', ')}]，共 ${result.findings.length} 条 finding；` +
+        `新建 Issue ${published.created} 个，复用 ${published.reused} 个${published.degraded ? '（部分降级为内联）' : ''}。`);
 }
 run().catch((error) => {
     core.setFailed(error instanceof Error ? error.message : String(error));
@@ -36068,54 +36122,88 @@ run().catch((error) => {
 /***/ }),
 
 /***/ 6951:
-/***/ ((__unused_webpack_module, exports) => {
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.formatReviewComment = formatReviewComment;
+exports.formatIssueTitle = formatIssueTitle;
+exports.formatIssueBody = formatIssueBody;
+exports.formatSummaryComment = formatSummaryComment;
+const markers_js_1 = __nccwpck_require__(3457);
 const SEVERITY_EMOJI = {
     阻塞: '🛑',
     重要: '⚠️',
     建议: '💡',
 };
-function formatFinding(f, index) {
+const RISK_EMOJI = {
+    高: '🔴',
+    中: '🟡',
+    低: '🟢',
+};
+/** The four-part architecture write-up for a single finding. */
+function formatFinding(f) {
     const where = f.line === null ? f.file : `${f.file}:${f.line}`;
     return [
-        `### ${index + 1}. ${SEVERITY_EMOJI[f.severity]} [${f.severity} · ${f.type}] \`${where}\``,
+        `${SEVERITY_EMOJI[f.severity]} **[${f.severity} · ${f.type}] \`${where}\`**`,
         `**问题根因**：${f.rootCause}`,
         `**为什么低级解法不够**：${f.whyLowEffortInsufficient}`,
         `**架构级方案**：${f.architecturalSolution}`,
         `**代价/收益**：${f.tradeoffs}`,
     ].join('\n\n');
 }
-const RISK_EMOJI = {
-    高: '🔴',
-    中: '🟡',
-    低: '🟢',
-};
-/** Render a ReviewResult as the Markdown body of a PR comment. Pure function. */
-function formatReviewComment(result) {
-    const header = '## 🐯 BanGD 数据库内核评审';
-    const overview = [
+/** Title for the issue that tracks a problem group. */
+function formatIssueTitle(group) {
+    const first = group.findings[0];
+    const type = first ? first.type : '架构';
+    const file = first ? first.file : '';
+    return `🐯 BanGD [${type}] ${file}`;
+}
+/** Body for the issue tracking a problem group (carries the dedup marker). */
+function formatIssueBody(group, prNumber) {
+    const body = group.findings.map((f) => formatFinding(f)).join('\n\n---\n\n');
+    return [
+        (0, markers_js_1.issueKeyMarker)(group.fullKey),
+        `> 来自 #${prNumber} 的架构级评审建议。**不阻塞合入**，仅供参考是否有更好的架构解法。`,
+        body,
+    ].join('\n\n');
+}
+/** The single, consolidated PR comment (architecture-level, not per-line). */
+function formatSummaryComment(result, items) {
+    const head = [
+        markers_js_1.SUMMARY_MARKER,
+        '## 🐯 BanGD 数据库内核评审',
         `**整体风险**：${RISK_EMOJI[result.overallRisk]} ${result.overallRisk}`,
         `**变更总结**：${result.changeSummary}`,
+        `> 本评审不阻塞合入；架构级建议以 Issue 形式跟踪。`,
     ].join('\n\n');
-    if (result.findings.length === 0) {
-        return `${header}\n\n${overview}\n\n未发现需要从架构层面改进的问题。`;
+    if (items.length === 0) {
+        return `${head}\n\n未发现需要从架构层面改进的问题。`;
     }
-    const body = result.findings.map((f, i) => formatFinding(f, i)).join('\n\n---\n\n');
-    return `${header}\n\n${overview}\n\n---\n\n${body}`;
+    const list = items
+        .map((item) => {
+        const first = item.group.findings[0];
+        const label = first ? `[${first.type}] \`${first.file}\`` : item.group.fullKey;
+        if (item.url)
+            return `- ${label} → ${item.url}`;
+        // Issue creation failed: inline the detail so the analysis isn't lost.
+        const detail = item.group.findings.map((f) => formatFinding(f)).join('\n\n');
+        return `- ${label}（建 Issue 失败，详情见下）\n\n${detail}`;
+    })
+        .join('\n');
+    return `${head}\n\n### 架构问题（共 ${items.length} 项）\n\n${list}`;
 }
 
 
 /***/ }),
 
 /***/ 4799:
-/***/ ((__unused_webpack_module, exports) => {
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.GithubPrContext = void 0;
+exports.GithubPublisher = exports.GithubPrContext = void 0;
+const markers_js_1 = __nccwpck_require__(3457);
+const BANGD_LABEL = 'bangd';
 /** PrContext backed by the GitHub REST API via the Action's Octokit client. */
 class GithubPrContext {
     octokit;
@@ -36158,6 +36246,70 @@ class GithubPrContext {
     }
 }
 exports.GithubPrContext = GithubPrContext;
+/** ReviewPublisher backed by the GitHub REST API. */
+class GithubPublisher {
+    octokit;
+    params;
+    constructor(octokit, params) {
+        this.octokit = octokit;
+        this.params = params;
+    }
+    async listExistingIssues() {
+        const res = await this.octokit.rest.issues.listForRepo({
+            owner: this.params.owner,
+            repo: this.params.repo,
+            labels: BANGD_LABEL,
+            state: 'open',
+            per_page: 100,
+        });
+        const issues = [];
+        for (const item of res.data) {
+            // listForRepo also returns PRs (every PR is an issue in the API); skip them.
+            if (item.pull_request)
+                continue;
+            const fullKey = (0, markers_js_1.parseIssueKey)(item.body);
+            if (fullKey)
+                issues.push({ fullKey, url: item.html_url });
+        }
+        return issues;
+    }
+    async createIssue(input) {
+        const res = await this.octokit.rest.issues.create({
+            owner: this.params.owner,
+            repo: this.params.repo,
+            title: input.title,
+            body: input.body,
+            labels: [BANGD_LABEL],
+        });
+        return { number: res.data.number, url: res.data.html_url };
+    }
+    async upsertSummaryComment(body) {
+        const existing = await this.octokit.rest.issues.listComments({
+            owner: this.params.owner,
+            repo: this.params.repo,
+            issue_number: this.params.pullNumber,
+            per_page: 100,
+        });
+        const mine = existing.data.find((c) => c.body?.includes(markers_js_1.SUMMARY_MARKER));
+        if (mine) {
+            await this.octokit.rest.issues.updateComment({
+                owner: this.params.owner,
+                repo: this.params.repo,
+                comment_id: mine.id,
+                body,
+            });
+        }
+        else {
+            await this.octokit.rest.issues.createComment({
+                owner: this.params.owner,
+                repo: this.params.repo,
+                issue_number: this.params.pullNumber,
+                body,
+            });
+        }
+    }
+}
+exports.GithubPublisher = GithubPublisher;
 
 
 /***/ }),
@@ -36238,6 +36390,37 @@ exports.AnthropicLlmClient = AnthropicLlmClient;
 
 /***/ }),
 
+/***/ 3457:
+/***/ ((__unused_webpack_module, exports) => {
+
+
+/**
+ * Hidden HTML-comment markers BanGD embeds in the artifacts it creates, so it
+ * can find and dedup them on later runs (issues by problem key, the one summary
+ * comment by a fixed tag).
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.SUMMARY_MARKER = void 0;
+exports.issueKeyMarker = issueKeyMarker;
+exports.parseIssueKey = parseIssueKey;
+/** Tag on the single per-PR summary comment, used to upsert (find→update). */
+exports.SUMMARY_MARKER = '<!-- bangd-summary -->';
+/** Marker embedded in each issue body carrying its dedup key. */
+function issueKeyMarker(fullKey) {
+    return `<!-- bangd-key: ${fullKey} -->`;
+}
+const ISSUE_KEY_RE = /<!--\s*bangd-key:\s*(.+?)\s*-->/;
+/** Parse the dedup key out of an issue body, or null if absent. */
+function parseIssueKey(body) {
+    if (!body)
+        return null;
+    const match = ISSUE_KEY_RE.exec(body);
+    return match ? (match[1] ?? null) : null;
+}
+
+
+/***/ }),
+
 /***/ 5989:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -36286,6 +36469,54 @@ function defaultPromptsDir() {
         }
         dir = (0, node_path_1.dirname)(dir);
     }
+}
+
+
+/***/ }),
+
+/***/ 1101:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.publishReview = publishReview;
+const publish_js_1 = __nccwpck_require__(3252);
+const format_js_1 = __nccwpck_require__(6951);
+/**
+ * Publish a review: file one issue per *new* architecture problem (skipping
+ * problems already filed for this PR), then upsert one consolidated PR comment
+ * linking to them. Non-blocking — issue-create failures degrade to inlining the
+ * finding into the comment rather than failing the run.
+ */
+async function publishReview(publisher, result, prNumber) {
+    const groups = (0, publish_js_1.groupFindings)(result.findings, prNumber);
+    const existing = await publisher.listExistingIssues();
+    const existingUrls = new Map(existing.map((e) => [e.fullKey, e.url]));
+    const { known } = (0, publish_js_1.partitionGroups)(groups, new Set(existingUrls.keys()));
+    const knownKeys = new Set(known.map((g) => g.fullKey));
+    const items = [];
+    let created = 0;
+    let degraded = false;
+    for (const group of groups) {
+        if (knownKeys.has(group.fullKey)) {
+            items.push({ group, url: existingUrls.get(group.fullKey) ?? null });
+            continue;
+        }
+        try {
+            const issue = await publisher.createIssue({
+                title: (0, format_js_1.formatIssueTitle)(group),
+                body: (0, format_js_1.formatIssueBody)(group, prNumber),
+            });
+            created++;
+            items.push({ group, url: issue.url });
+        }
+        catch {
+            degraded = true;
+            items.push({ group, url: null });
+        }
+    }
+    await publisher.upsertSummaryComment((0, format_js_1.formatSummaryComment)(result, items));
+    return { created, reused: known.length, degraded };
 }
 
 

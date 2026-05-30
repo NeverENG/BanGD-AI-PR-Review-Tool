@@ -1,10 +1,10 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
 import { review } from '../core/review.js';
-import { GithubPrContext } from './github.js';
+import { GithubPrContext, GithubPublisher } from './github.js';
 import { AnthropicLlmClient } from './llm.js';
 import { loadPromptTexts } from './prompts.js';
-import { formatReviewComment } from './format.js';
+import { publishReview } from './publish.js';
 
 function readString(obj: Record<string, unknown>, key: string): string {
   const value = obj[key];
@@ -48,15 +48,14 @@ export async function run(): Promise<void> {
 
   const { result, dimensions } = await review({ llm, pr: prContext }, prompts);
 
-  await octokit.rest.issues.createComment({
-    owner,
-    repo,
-    issue_number: pr.number,
-    body: formatReviewComment(result),
-  });
+  const publisher = new GithubPublisher(octokit, { owner, repo, pullNumber: pr.number });
+  const published = await publishReview(publisher, result, pr.number);
 
   core.setOutput('finding_count', result.findings.length);
-  core.info(`BanGD 评审完成，维度=[${dimensions.join(', ')}]，共 ${result.findings.length} 条 finding。`);
+  core.info(
+    `BanGD 评审完成，维度=[${dimensions.join(', ')}]，共 ${result.findings.length} 条 finding；` +
+      `新建 Issue ${published.created} 个，复用 ${published.reused} 个${published.degraded ? '（部分降级为内联）' : ''}。`,
+  );
 }
 
 run().catch((error: unknown) => {

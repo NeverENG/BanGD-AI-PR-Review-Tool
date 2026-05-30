@@ -30,7 +30,8 @@ The keystone is **dependency injection through two ports**, which delivers trigg
   - `ports.ts` — `LlmClient` and `PrContext` interfaces (the injection seam). `LlmClient.generateStructured` returns `unknown`; the core owns validation.
   - `prompt.ts` / `review.ts` — prompt assembly + orchestrator. `review()` returns `{result, dimensions}`.
   - `dimensions.ts` / `router.ts` — **progressive disclosure**: the rubric is split per dimension under `prompts/rubric/<id>.md`; the router picks relevant dimensions by keyword (heuristic), falling back to an LLM classify call then to all dimensions, so each request carries only the applicable rubric fragments + examples (token savings).
-- `src/shell/` — thin adapters that implement the ports. `llm.ts` (Anthropic, tool-use structured output + prompt caching), `github.ts` (Octokit `PrContext`), `format.ts` (pure `ReviewResult`→Markdown), `prompts.ts` (loads `prompts/*.md` — IO lives in the shell, core stays pure), `action.ts` (entry).
+- `src/shell/` — thin adapters that implement the ports. `llm.ts` (Anthropic, tool-use structured output + prompt caching), `github.ts` (Octokit `PrContext` + `GithubPublisher`), `format.ts` (pure issue/comment Markdown), `prompts.ts` (loads `prompts/*` — IO lives in the shell, core stays pure), `publish.ts` (delivery orchestration), `markers.ts` (hidden dedup markers), `action.ts` (entry).
+- **Delivery (non-blocking)**: `publishReview` files one GitHub Issue per *new* architecture problem and upserts one consolidated PR comment linking to them. Dedup is by a deterministic key `pr<N>:<file>:<type>` (computed in code, never model-emitted, so re-reviews on each push don't spam). Consequence: same-type findings in one file merge into one issue. Issue-create failure degrades to inlining the finding in the comment.
 - `action.yml` — Action metadata; runs `dist/index.js`.
 
 To add the future Probot App: write a new shell implementing the same two ports; the core is unchanged.
