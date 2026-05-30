@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-MVP scaffold is in place: a trigger-agnostic review core + a GitHub Action shell, all typechecked/linted/tested. The end-to-end path (diff → core → posted comment) is wired but **not yet runnable as a published Action** — see "Known follow-ups" below.
+MVP is **verified end-to-end in production**: the published Action ran on NeverENG/BanDB#42, called the model (DeepSeek via the Anthropic-compatible endpoint), validated structured output, and posted a correct review comment (🟢 low risk, 0 findings on a CI-only change). Confirms: forced `tool_use` works on DeepSeek's compat endpoint (no JSON fallback needed), and the no-findings path posts a clean comment. Trigger-agnostic core + GitHub Action shell, all typechecked/linted/tested.
+
+Not yet stress-tested on a PR that changes real Go database code — that's what would exercise the architecture-level review depth (the CI-YAML PR correctly yielded 0 findings).
 
 ## Commands
 
@@ -34,7 +36,7 @@ To add the future Probot App: write a new shell implementing the same two ports;
 
 ## Known follow-ups
 
-- **Action isn't runnable until bundled.** A `node20` Action runs committed JS, not TS, and does not `npm install` at runtime. Must `npm run build:action` and **commit `dist/`** (it's intentionally not gitignored). The bundled code also can't find `prompts/*.md` via the current relative path — inline the prompt text at build time (or copy `prompts/` next to `dist/`) before relying on `loadPromptTexts()` in the Action.
+- **Remember to rebuild the bundle.** A `node20` Action runs committed JS, not TS, and does not `npm install` at runtime. After any source change, `npm run build:action` and **commit `dist/`** (intentionally not gitignored). Prompt resolution is layout-independent (`prompts.ts` ascends to find `prompts/system-prompt.md`), verified working from the flat `dist/` bundle in the production run.
 - **No evaluation corpus yet.** Before trusting architecture-level suggestions, build a set of past PRs + expert reviews and measure BanGD's agreement; iterate the rubric/examples against it.
 - **Single-pass review only.** No agentic file-reading loop yet (`PrContext.readFile` exists but the core doesn't pull surrounding code). That's the next quality lever after the corpus.
 
