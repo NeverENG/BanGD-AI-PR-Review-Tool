@@ -35732,6 +35732,7 @@ async function run() {
     const apiKey = core.getInput('anthropic_api_key', { required: true });
     const githubToken = core.getInput('github_token', { required: true });
     const model = core.getInput('model') || undefined;
+    const baseUrl = core.getInput('base_url') || undefined;
     const pr = github.context.payload.pull_request;
     if (!pr) {
         core.setFailed('BanGD 只能在 pull_request 事件上运行（找不到 PR 上下文）。');
@@ -35752,7 +35753,11 @@ async function run() {
         },
     });
     const prompts = await (0, prompts_js_1.loadPromptTexts)();
-    const llm = new llm_js_1.AnthropicLlmClient({ apiKey, ...(model ? { model } : {}) });
+    const llm = new llm_js_1.AnthropicLlmClient({
+        apiKey,
+        ...(model ? { model } : {}),
+        ...(baseUrl ? { baseURL: baseUrl } : {}),
+    });
     const result = await (0, review_js_1.review)({ llm, pr: prContext }, prompts);
     await octokit.rest.issues.createComment({
         owner,
@@ -35874,33 +35879,49 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.AnthropicLlmClient = void 0;
+exports.shouldUsePromptCaching = shouldUsePromptCaching;
 const sdk_1 = __importDefault(__nccwpck_require__(121));
 const SUBMIT_TOOL = 'submit_review';
 /**
- * LlmClient backed by the Anthropic Messages API. Forces structured output via
- * a single tool (`submit_review`) whose input_schema is the caller-supplied
- * JSON Schema, and returns the tool input unvalidated (`unknown`) — the core
- * owns Zod validation. The fixed system block carries a `cache_control`
- * breakpoint so the per-PR diff (the user message) is the only uncached tail.
+ * Prompt caching is an Anthropic-specific feature; compatible third-party
+ * endpoints may reject the `cache_control` field. So cache only when talking to
+ * Anthropic directly (no `baseURL`), unless explicitly overridden.
+ */
+function shouldUsePromptCaching(baseURL, override) {
+    return override ?? baseURL === undefined;
+}
+/**
+ * LlmClient backed by the Anthropic Messages API (or an Anthropic-compatible
+ * provider via `baseURL`). Forces structured output via a single tool
+ * (`submit_review`) whose input_schema is the caller-supplied JSON Schema, and
+ * returns the tool input unvalidated (`unknown`) — the core owns Zod validation.
  */
 class AnthropicLlmClient {
     client;
     model;
     maxTokens;
+    caching;
     constructor(options) {
-        this.client = new sdk_1.default({ apiKey: options.apiKey });
+        this.client = new sdk_1.default({
+            apiKey: options.apiKey,
+            ...(options.baseURL ? { baseURL: options.baseURL } : {}),
+        });
         this.model = options.model ?? 'claude-opus-4-8';
         this.maxTokens = options.maxTokens ?? 8192;
+        this.caching = shouldUsePromptCaching(options.baseURL, options.promptCaching);
     }
     async generateStructured(request) {
         const inputSchema = {
             ...request.outputSchema,
             type: 'object',
         };
+        const system = this.caching
+            ? [{ type: 'text', text: request.system, cache_control: { type: 'ephemeral' } }]
+            : request.system;
         const message = await this.client.messages.create({
             model: this.model,
             max_tokens: this.maxTokens,
-            system: [{ type: 'text', text: request.system, cache_control: { type: 'ephemeral' } }],
+            system,
             tools: [
                 {
                     name: SUBMIT_TOOL,

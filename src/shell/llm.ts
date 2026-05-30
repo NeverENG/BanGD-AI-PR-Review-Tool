@@ -7,24 +7,45 @@ export interface AnthropicLlmOptions {
   apiKey: string;
   model?: string;
   maxTokens?: number;
+  /**
+   * Override the API base URL to point at an Anthropic-compatible provider
+   * (e.g. DeepSeek's `https://api.deepseek.com/anthropic`). Leave unset for
+   * Anthropic itself.
+   */
+  baseURL?: string;
+  /** Force prompt caching on/off; defaults to on only for Anthropic itself. */
+  promptCaching?: boolean;
 }
 
 /**
- * LlmClient backed by the Anthropic Messages API. Forces structured output via
- * a single tool (`submit_review`) whose input_schema is the caller-supplied
- * JSON Schema, and returns the tool input unvalidated (`unknown`) — the core
- * owns Zod validation. The fixed system block carries a `cache_control`
- * breakpoint so the per-PR diff (the user message) is the only uncached tail.
+ * Prompt caching is an Anthropic-specific feature; compatible third-party
+ * endpoints may reject the `cache_control` field. So cache only when talking to
+ * Anthropic directly (no `baseURL`), unless explicitly overridden.
+ */
+export function shouldUsePromptCaching(baseURL?: string, override?: boolean): boolean {
+  return override ?? baseURL === undefined;
+}
+
+/**
+ * LlmClient backed by the Anthropic Messages API (or an Anthropic-compatible
+ * provider via `baseURL`). Forces structured output via a single tool
+ * (`submit_review`) whose input_schema is the caller-supplied JSON Schema, and
+ * returns the tool input unvalidated (`unknown`) — the core owns Zod validation.
  */
 export class AnthropicLlmClient implements LlmClient {
   private readonly client: Anthropic;
   private readonly model: string;
   private readonly maxTokens: number;
+  private readonly caching: boolean;
 
   constructor(options: AnthropicLlmOptions) {
-    this.client = new Anthropic({ apiKey: options.apiKey });
+    this.client = new Anthropic({
+      apiKey: options.apiKey,
+      ...(options.baseURL ? { baseURL: options.baseURL } : {}),
+    });
     this.model = options.model ?? 'claude-opus-4-8';
     this.maxTokens = options.maxTokens ?? 8192;
+    this.caching = shouldUsePromptCaching(options.baseURL, options.promptCaching);
   }
 
   async generateStructured(request: LlmRequest): Promise<unknown> {
@@ -33,10 +54,14 @@ export class AnthropicLlmClient implements LlmClient {
       type: 'object',
     };
 
+    const system: Anthropic.MessageCreateParams['system'] = this.caching
+      ? [{ type: 'text', text: request.system, cache_control: { type: 'ephemeral' } }]
+      : request.system;
+
     const message = await this.client.messages.create({
       model: this.model,
       max_tokens: this.maxTokens,
-      system: [{ type: 'text', text: request.system, cache_control: { type: 'ephemeral' } }],
+      system,
       tools: [
         {
           name: SUBMIT_TOOL,

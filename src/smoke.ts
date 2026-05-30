@@ -1,0 +1,63 @@
+/**
+ * Manual end-to-end smoke test: runs the real review pipeline (assemble prompts
+ * → call the LLM → Zod-validate) against a sample diff, with no GitHub involved.
+ * Used to verify the live LLM path "打通链路".
+ *
+ * Run:
+ *   npm run build
+ *   # Anthropic:
+ *   ANTHROPIC_API_KEY=sk-... node build/smoke.js
+ *   # DeepSeek (Anthropic-compatible endpoint):
+ *   ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic \
+ *   ANTHROPIC_API_KEY=<deepseek-key> BANGD_MODEL=deepseek-chat node build/smoke.js
+ */
+import { review } from './core/review.js';
+import type { PrContext } from './core/ports.js';
+import { AnthropicLlmClient } from './shell/llm.js';
+import { loadPromptTexts } from './shell/prompts.js';
+import { formatReviewComment } from './shell/format.js';
+
+const apiKey = process.env['ANTHROPIC_API_KEY'] ?? process.env['DEEPSEEK_API_KEY'];
+if (!apiKey) {
+  console.error('请设置 ANTHROPIC_API_KEY（或 DEEPSEEK_API_KEY）。');
+  process.exit(1);
+}
+const baseURL = process.env['ANTHROPIC_BASE_URL'];
+const model = process.env['BANGD_MODEL'];
+
+const SAMPLE_DIFF = `diff --git a/cache/block.go b/cache/block.go
+@@ type BlockCache struct {
+ 	blocks map[uint64]*Block
++	hits   uint64
+ }
+
+ func (c *BlockCache) Get(id uint64) *Block {
+ 	b := c.blocks[id]
++	if b != nil {
++		c.hits++
++	}
+ 	return b
+ }`;
+
+const pr: PrContext = {
+  metadata: {
+    title: 'cache: track block-cache hit count',
+    body: '在块缓存读路径上新增命中计数，用于观测命中率。',
+    number: null,
+  },
+  getDiff: () => Promise.resolve(SAMPLE_DIFF),
+  readFile: () => Promise.resolve(null),
+};
+
+const prompts = await loadPromptTexts();
+const llm = new AnthropicLlmClient({
+  apiKey,
+  ...(baseURL ? { baseURL } : {}),
+  ...(model ? { model } : {}),
+});
+
+console.error(`调用模型 ${model ?? 'claude-opus-4-8'}${baseURL ? ` @ ${baseURL}` : ''} ...`);
+const result = await review({ llm, pr }, prompts);
+
+console.log(formatReviewComment(result));
+console.log('\n--- raw ReviewResult ---\n' + JSON.stringify(result, null, 2));

@@ -15,6 +15,7 @@ export async function run(): Promise<void> {
   const apiKey = core.getInput('anthropic_api_key', { required: true });
   const githubToken = core.getInput('github_token', { required: true });
   const model = core.getInput('model') || undefined;
+  const baseUrl = core.getInput('base_url') || undefined;
 
   const pr = github.context.payload.pull_request;
   if (!pr) {
@@ -39,7 +40,11 @@ export async function run(): Promise<void> {
   });
 
   const prompts = await loadPromptTexts();
-  const llm = new AnthropicLlmClient({ apiKey, ...(model ? { model } : {}) });
+  const llm = new AnthropicLlmClient({
+    apiKey,
+    ...(model ? { model } : {}),
+    ...(baseUrl ? { baseURL: baseUrl } : {}),
+  });
 
   const result = await review({ llm, pr: prContext }, prompts);
 
