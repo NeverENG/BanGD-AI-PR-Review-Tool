@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "build:action": "ncc build src/shell/action.ts -o dist --source-map",
+    "build:action": "ncc build src/shell/action.ts -o dist --source-map --transpile-only",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
