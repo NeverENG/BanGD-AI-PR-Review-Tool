@@ -10,11 +10,19 @@ const prompts: PromptTexts = {
   examples: ['EXAMPLE_A', 'EXAMPLE_B'],
 };
 
+const SAMPLE_DIFF = [
+  'diff --git a/cache/block.go b/cache/block.go',
+  '--- a/cache/block.go',
+  '+++ b/cache/block.go',
+  '@@ -1 +1 @@',
+].join('\n');
+
 function fakePr(overrides: Partial<PrContext> = {}): PrContext {
   return {
     metadata: { title: 'add hit counter', body: 'tracks cache hits', number: 7 },
-    getDiff: () => Promise.resolve('diff --git a/cache/block.go b/cache/block.go'),
-    readFile: () => Promise.resolve(null),
+    getDiff: () => Promise.resolve(SAMPLE_DIFF),
+    readFile: (path: string) =>
+      Promise.resolve(path === 'cache/block.go' ? 'package cache\n// FULL FILE BODY' : null),
     ...overrides,
   };
 }
@@ -71,6 +79,22 @@ describe('review (core orchestrator)', () => {
     expect(seen?.user).toContain('THE_DIFF');
     expect(seen?.user).toContain('add hit counter');
     expect(seen?.outputSchema).toBe(reviewResultJsonSchema);
+  });
+
+  it('reads the changed files and includes their contents in the prompt', async () => {
+    let seen: LlmRequest | undefined;
+    const readFile = vi.fn((path: string) =>
+      Promise.resolve(path === 'cache/block.go' ? 'package cache\n// FULL FILE BODY' : null),
+    );
+    const deps: ReviewDeps = {
+      llm: fakeLlm(validResult, (r) => (seen = r)),
+      pr: fakePr({ readFile }),
+    };
+    await review(deps, prompts);
+
+    expect(readFile).toHaveBeenCalledWith('cache/block.go');
+    expect(seen?.user).toContain('被改动文件的完整内容');
+    expect(seen?.user).toContain('FULL FILE BODY');
   });
 
   it('rejects model output that violates the schema', async () => {

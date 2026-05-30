@@ -27,8 +27,8 @@ export function assembleSystemPrompt(texts: PromptTexts): string {
   ].join('\n\n---\n\n');
 }
 
-export function assembleUserPrompt(metadata: PrMetadata, diff: string): string {
-  return [
+export function assembleUserPrompt(metadata: PrMetadata, diff: string, filesText: string): string {
+  const sections = [
     `# 待评审的 PR`,
     `标题：${metadata.title}`,
     `描述：\n${metadata.body || '(无描述)'}`,
@@ -36,6 +36,15 @@ export function assembleUserPrompt(metadata: PrMetadata, diff: string): string {
     '```diff',
     diff,
     '```',
+  ];
+  if (filesText) {
+    sections.push(
+      `# 被改动文件的完整内容（用于理解 diff 之外的上下文）`,
+      filesText,
+    );
+  }
+  sections.push(
     `请按系统提示词中的输出格式产出：1) PR 变更总结（changeSummary）；2) 整体风险等级（overallRisk）；3) 逐条风险识别与 Review 建议（findings）。`,
-  ].join('\n\n');
+  );
+  return sections.join('\n\n');
 }
