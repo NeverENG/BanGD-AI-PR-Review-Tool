@@ -36027,6 +36027,56 @@ exports.reviewResultJsonSchema = {
 
 /***/ }),
 
+/***/ 4528:
+/***/ ((__unused_webpack_module, exports) => {
+
+
+/**
+ * Token accounting. The LLM client accumulates usage across all calls in a run
+ * (routing + review), and the Action records the per-run total (log, step
+ * summary, PR comment footer). Pure so it's testable without the network.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.emptyUsage = emptyUsage;
+exports.addUsage = addUsage;
+exports.totalTokens = totalTokens;
+exports.extractUsage = extractUsage;
+exports.formatUsage = formatUsage;
+function emptyUsage() {
+    return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
+}
+function addUsage(a, b) {
+    return {
+        inputTokens: a.inputTokens + b.inputTokens,
+        outputTokens: a.outputTokens + b.outputTokens,
+        cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
+        cacheCreationTokens: a.cacheCreationTokens + b.cacheCreationTokens,
+    };
+}
+/** Grand total tokens billed for the run (all input flavors + output). */
+function totalTokens(u) {
+    return u.inputTokens + u.cacheReadTokens + u.cacheCreationTokens + u.outputTokens;
+}
+function extractUsage(raw) {
+    if (!raw)
+        return emptyUsage();
+    return {
+        inputTokens: raw.input_tokens ?? 0,
+        outputTokens: raw.output_tokens ?? 0,
+        cacheReadTokens: raw.cache_read_input_tokens ?? 0,
+        cacheCreationTokens: raw.cache_creation_input_tokens ?? 0,
+    };
+}
+/** One-line human summary, e.g. for logs and the PR comment footer. */
+function formatUsage(u) {
+    return (`共 ${totalTokens(u)} tokens` +
+        `（输入 ${u.inputTokens}，输出 ${u.outputTokens}，` +
+        `缓存命中 ${u.cacheReadTokens}，缓存写入 ${u.cacheCreationTokens}）`);
+}
+
+
+/***/ }),
+
 /***/ 250:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -36073,6 +36123,7 @@ const github_js_1 = __nccwpck_require__(4799);
 const llm_js_1 = __nccwpck_require__(5653);
 const prompts_js_1 = __nccwpck_require__(5989);
 const publish_js_1 = __nccwpck_require__(1101);
+const usage_js_1 = __nccwpck_require__(4528);
 function readString(obj, key) {
     const value = obj[key];
     return typeof value === 'string' ? value : '';
@@ -36108,11 +36159,21 @@ async function run() {
         ...(baseUrl ? { baseURL: baseUrl } : {}),
     });
     const { result, dimensions } = await (0, review_js_1.review)({ llm, pr: prContext }, prompts);
+    const usage = llm.usage;
+    const footer = `本次评审消耗 token：${(0, usage_js_1.formatUsage)(usage)}｜维度 [${dimensions.join(', ')}]`;
     const publisher = new github_js_1.GithubPublisher(octokit, { owner, repo, pullNumber: pr.number });
-    const published = await (0, publish_js_1.publishReview)(publisher, result, pr.number);
+    const published = await (0, publish_js_1.publishReview)(publisher, result, pr.number, footer);
     core.setOutput('finding_count', result.findings.length);
+    core.setOutput('total_tokens', (0, usage_js_1.totalTokens)(usage));
     core.info(`BanGD 评审完成，维度=[${dimensions.join(', ')}]，共 ${result.findings.length} 条 finding；` +
         `新建 Issue ${published.created} 个，复用 ${published.reused} 个${published.degraded ? '（部分降级为内联）' : ''}。`);
+    core.info(`Token 用量：${(0, usage_js_1.formatUsage)(usage)}`);
+    await core.summary
+        .addHeading('BanGD 评审', 3)
+        .addRaw(`维度：${dimensions.join(', ')}；finding：${result.findings.length}；`)
+        .addRaw(`新建 Issue ${published.created}，复用 ${published.reused}。`)
+        .addRaw(`\n\nToken 用量：${(0, usage_js_1.formatUsage)(usage)}`)
+        .write();
 }
 run().catch((error) => {
     core.setFailed(error instanceof Error ? error.message : String(error));
@@ -36168,7 +36229,7 @@ function formatIssueBody(group, prNumber) {
     ].join('\n\n');
 }
 /** The single, consolidated PR comment (architecture-level, not per-line). */
-function formatSummaryComment(result, items) {
+function formatSummaryComment(result, items, footer) {
     const head = [
         markers_js_1.SUMMARY_MARKER,
         '## 🐯 BanGD 数据库内核评审',
@@ -36176,8 +36237,9 @@ function formatSummaryComment(result, items) {
         `**变更总结**：${result.changeSummary}`,
         `> 本评审不阻塞合入；架构级建议以 Issue 形式跟踪。`,
     ].join('\n\n');
+    const foot = footer ? `\n\n---\n\n<sub>${footer}</sub>` : '';
     if (items.length === 0) {
-        return `${head}\n\n未发现需要从架构层面改进的问题。`;
+        return `${head}\n\n未发现需要从架构层面改进的问题。${foot}`;
     }
     const list = items
         .map((item) => {
@@ -36190,7 +36252,7 @@ function formatSummaryComment(result, items) {
         return `- ${label}（建 Issue 失败，详情见下）\n\n${detail}`;
     })
         .join('\n');
-    return `${head}\n\n### 架构问题（共 ${items.length} 项）\n\n${list}`;
+    return `${head}\n\n### 架构问题（共 ${items.length} 项）\n\n${list}${foot}`;
 }
 
 
@@ -36325,6 +36387,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.AnthropicLlmClient = void 0;
 exports.shouldUsePromptCaching = shouldUsePromptCaching;
 const sdk_1 = __importDefault(__nccwpck_require__(121));
+const usage_js_1 = __nccwpck_require__(4528);
 const SUBMIT_TOOL = 'submit_review';
 /**
  * Prompt caching is an Anthropic-specific feature; compatible third-party
@@ -36345,6 +36408,11 @@ class AnthropicLlmClient {
     model;
     maxTokens;
     caching;
+    accumulated = (0, usage_js_1.emptyUsage)();
+    /** Cumulative token usage across every call made by this client. */
+    get usage() {
+        return this.accumulated;
+    }
     constructor(options) {
         this.client = new sdk_1.default({
             apiKey: options.apiKey,
@@ -36378,6 +36446,7 @@ class AnthropicLlmClient {
             tool_choice: { type: 'tool', name: SUBMIT_TOOL },
             messages: [{ role: 'user', content: request.user }],
         });
+        this.accumulated = (0, usage_js_1.addUsage)(this.accumulated, (0, usage_js_1.extractUsage)(message.usage));
         const toolUse = message.content.find((block) => block.type === 'tool_use');
         if (!toolUse) {
             throw new Error('模型未返回 tool_use 结果，无法解析结构化评审。');
@@ -36488,7 +36557,7 @@ const format_js_1 = __nccwpck_require__(6951);
  * linking to them. Non-blocking — issue-create failures degrade to inlining the
  * finding into the comment rather than failing the run.
  */
-async function publishReview(publisher, result, prNumber) {
+async function publishReview(publisher, result, prNumber, footer) {
     const groups = (0, publish_js_1.groupFindings)(result.findings, prNumber);
     const existing = await publisher.listExistingIssues();
     const existingUrls = new Map(existing.map((e) => [e.fullKey, e.url]));
@@ -36515,7 +36584,7 @@ async function publishReview(publisher, result, prNumber) {
             items.push({ group, url: null });
         }
     }
-    await publisher.upsertSummaryComment((0, format_js_1.formatSummaryComment)(result, items));
+    await publisher.upsertSummaryComment((0, format_js_1.formatSummaryComment)(result, items, footer));
     return { created, reused: known.length, degraded };
 }
 

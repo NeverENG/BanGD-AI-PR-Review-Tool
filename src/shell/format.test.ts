@@ -60,4 +60,13 @@ describe('formatSummaryComment', () => {
     const md = formatSummaryComment({ changeSummary: '小改动', overallRisk: '低', findings: [] }, []);
     expect(md).toContain('未发现需要从架构层面改进的问题');
   });
+
+  it('appends the footer (e.g. token usage) when provided', () => {
+    const md = formatSummaryComment(
+      { changeSummary: 's', overallRisk: '低', findings: [] },
+      [],
+      '本次评审消耗 token：共 117 tokens',
+    );
+    expect(md).toContain('共 117 tokens');
+  });
 });

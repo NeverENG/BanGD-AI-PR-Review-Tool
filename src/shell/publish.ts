@@ -41,6 +41,7 @@ export async function publishReview(
   publisher: ReviewPublisher,
   result: ReviewResult,
   prNumber: number,
+  footer?: string,
 ): Promise<PublishOutcome> {
   const groups = groupFindings(result.findings, prNumber);
   const existing = await publisher.listExistingIssues();
@@ -70,6 +71,6 @@ export async function publishReview(
     }
   }
 
-  await publisher.upsertSummaryComment(formatSummaryComment(result, items));
+  await publisher.upsertSummaryComment(formatSummaryComment(result, items, footer));
   return { created, reused: known.length, degraded };
 }

@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { LlmClient, LlmRequest } from '../core/ports.js';
+import { addUsage, emptyUsage, extractUsage, type TokenUsage } from '../core/usage.js';
 
 const SUBMIT_TOOL = 'submit_review';
 
@@ -41,6 +42,12 @@ export class AnthropicLlmClient implements LlmClient {
   private readonly model: string;
   private readonly maxTokens: number;
   private readonly caching: boolean;
+  private accumulated: TokenUsage = emptyUsage();
+
+  /** Cumulative token usage across every call made by this client. */
+  get usage(): TokenUsage {
+    return this.accumulated;
+  }
 
   constructor(options: AnthropicLlmOptions) {
     this.client = new Anthropic({
@@ -78,6 +85,8 @@ export class AnthropicLlmClient implements LlmClient {
       tool_choice: { type: 'tool', name: SUBMIT_TOOL },
       messages: [{ role: 'user', content: request.user }],
     });
+
+    this.accumulated = addUsage(this.accumulated, extractUsage(message.usage));
 
     const toolUse = message.content.find((block) => block.type === 'tool_use');
     if (!toolUse) {

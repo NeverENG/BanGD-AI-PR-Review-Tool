@@ -20,6 +20,8 @@ inputs:
 outputs:
   finding_count:
     description: 'Number of findings BanGD produced.'
+  total_tokens:
+    description: 'Total tokens consumed by this review run (routing + review).'
 
 runs:
   using: 'node20'
