@@ -41,7 +41,11 @@ function refuterLlm(refuted: boolean, capture?: (r: LlmRequest) => void): LlmCli
 }
 
 describe('verifyFinding', () => {
-  it('drops on a strict majority refute (2 of 3)', async () => {
+  it('drops only on a UNANIMOUS refute (all 3 refute)', async () => {
+    expect(await verifyFinding(refuterLlm(true), finding('a.go'), ctx, 3)).toBe(true);
+  });
+
+  it('keeps unless unanimous — one defender saves it (2 of 3 refuted → kept)', async () => {
     let calls = 0;
     const llm: LlmClient = {
       generateStructured: () => {
@@ -49,18 +53,7 @@ describe('verifyFinding', () => {
         return Promise.resolve({ refuted: calls <= 2, reason: 'x' }); // 2 refute, 1 keep
       },
     };
-    expect(await verifyFinding(llm, finding('a.go'), ctx, 3)).toBe(true);
-  });
-
-  it('keeps on a tie (1 of 2 refuted is not a majority)', async () => {
-    let calls = 0;
-    const llm: LlmClient = {
-      generateStructured: () => {
-        calls++;
-        return Promise.resolve({ refuted: calls === 1, reason: 'x' }); // 1 refute, 1 keep
-      },
-    };
-    expect(await verifyFinding(llm, finding('a.go'), ctx, 2)).toBe(false);
+    expect(await verifyFinding(llm, finding('a.go'), ctx, 3)).toBe(false);
   });
 
   it('keeps when no refuter refutes', async () => {
@@ -72,8 +65,8 @@ describe('verifyFinding', () => {
     const llm: LlmClient = {
       generateStructured: () => {
         calls++;
-        // 1 real refute, 2 errored votes → errors count as keep → 1/3, not a majority.
-        return calls === 1 ? Promise.resolve({ refuted: true, reason: 'x' }) : Promise.reject(new Error('boom'));
+        // 2 real refutes, 1 errored vote → error counts as keep → 2/3, not unanimous → keep.
+        return calls <= 2 ? Promise.resolve({ refuted: true, reason: 'x' }) : Promise.reject(new Error('boom'));
       },
     };
     expect(await verifyFinding(llm, finding('a.go'), ctx, 3)).toBe(false);
@@ -85,6 +78,24 @@ describe('verifyFinding', () => {
     expect(seen?.outputSchema).toBe(VERDICT_SCHEMA);
     expect(seen?.user).toContain('cache/block.go');
     expect(seen?.user).toContain('所有权模型错误');
+  });
+
+  it('keeps by default (A): each refuter is told not to refute when unsure', async () => {
+    let seen: LlmRequest | undefined;
+    await verifyFinding(refuterLlm(false, (r) => (seen = r)), finding('a.go'), ctx, 1);
+    expect(seen?.system).toContain('默认保留');
+  });
+
+  it('sends perspective-diverse lenses across refuters (B)', async () => {
+    const systems: string[] = [];
+    const llm: LlmClient = {
+      generateStructured: (r: LlmRequest) => {
+        systems.push(r.system);
+        return Promise.resolve({ refuted: false, reason: 'x' });
+      },
+    };
+    await verifyFinding(llm, finding('a.go'), ctx, 3);
+    expect(new Set(systems).size).toBe(3); // three distinct lens prompts
   });
 });
 
