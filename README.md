@@ -3,7 +3,7 @@
 > 让 AI 像**资深数据库内核工程师**一样评审 PR，而不是像一个只会找语法错误的 linter。
 
 BanGD 是面向 **BanDB 数据库引擎（Go）** 的 AI PR 评审助手。它在每个 Pull Request 上自动给出**架构层面**的评审意见——不是"这里可能有并发问题，加个锁吧"，而是"这块内存的所有权模型错了，应该用读写分离的双表设计，既消除竞争又提升吞吐"。
-
+demo演示视频：https://www.bilibili.com/video/BV1EaVS6rEuN/?vd_source=a0576f42e09e3a525d24856e9882c44e
 ---
 
 ## 它解决什么问题
