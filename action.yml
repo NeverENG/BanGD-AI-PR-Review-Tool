@@ -23,11 +23,13 @@ inputs:
 
 outputs:
   finding_count:
-    description: 'Number of findings BanGD produced (after adversarial verification).'
+    description: 'Number of architecture-level findings BanGD produced (after adversarial verification).'
+  general_finding_count:
+    description: 'Number of ordinary code-level findings (the general-reviewer niche), after verification.'
   total_tokens:
     description: 'Total tokens consumed by this review run (routing + planning + review + verification).'
   dropped_count:
-    description: 'Findings dropped by adversarial verification as likely false positives.'
+    description: 'Findings (architecture + ordinary) dropped by adversarial verification as likely false positives.'
 
 runs:
   using: 'node20'

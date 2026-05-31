@@ -35720,16 +35720,20 @@ exports.assembleSystemPrompt = assembleSystemPrompt;
 exports.assembleUserPrompt = assembleUserPrompt;
 /**
  * Assemble the system prompt from the persona + only the selected rubric
- * fragments and their matching examples.
+ * fragments and their matching architecture examples, plus the always-on
+ * generalFindings exemplar.
  */
-function assembleSystemPrompt(systemPrompt, rubricFragments, examples) {
+function assembleSystemPrompt(systemPrompt, rubricFragments, examples, generalExample = '') {
     const parts = [systemPrompt];
     if (rubricFragments.length > 0) {
         parts.push('# 评审 Rubric（仅与本 PR 相关的维度）\n\n' + rubricFragments.join('\n\n'));
     }
     if (examples.length > 0) {
         const block = examples.map((ex, i) => `## 范例 ${i + 1}\n\n${ex}`).join('\n\n');
-        parts.push('# Few-shot 范例\n\n' + block);
+        parts.push('# 架构级 Few-shot 范例\n\n' + block);
+    }
+    if (generalExample) {
+        parts.push('# 普通问题 Few-shot 范例\n\n' + generalExample);
     }
     return parts.join('\n\n---\n\n');
 }
@@ -35749,7 +35753,7 @@ function assembleUserPrompt(metadata, diff, filesText, relatedText = '') {
     if (relatedText) {
         sections.push(`# 周边相关代码（未被改动，按需拉取，用于架构级推理）`, relatedText);
     }
-    sections.push(`请按系统提示词中的输出格式产出：1) PR 变更总结（changeSummary）；2) 整体风险等级（overallRisk）；3) 逐条风险识别与 Review 建议（findings）。`);
+    sections.push(`请按系统提示词中的输出格式产出：1) PR 变更总结（changeSummary）；2) 整体风险等级（overallRisk）；3) 架构级风险识别与 Review 建议（findings）；4) 普通代码级问题（generalFindings，遵守其质量红线，没有就返回空数组）。`);
     return sections.join('\n\n');
 }
 
@@ -36006,7 +36010,7 @@ async function review(deps, prompts, options = {}) {
     const examples = dimensions
         .map((id) => prompts.examples[id])
         .filter((ex) => ex !== undefined);
-    const system = (0, prompt_js_1.assembleSystemPrompt)(prompts.systemPrompt, rubricFragments, examples);
+    const system = (0, prompt_js_1.assembleSystemPrompt)(prompts.systemPrompt, rubricFragments, examples, prompts.generalExample);
     const user = (0, prompt_js_1.assembleUserPrompt)(deps.pr.metadata, cappedDiff, filesBlock.text, relatedBlock.text);
     const relatedFiles = related.map((f) => f.path);
     // The client returns the model's output unvalidated; the core owns the
@@ -36033,15 +36037,20 @@ async function review(deps, prompts, options = {}) {
     }
     // Adversarial verification: drop likely false positives by majority refute
     // (no-op when verifyVotes <= 0 or there are no findings — zero extra calls).
-    const { kept, dropped } = await (0, verify_js_1.verifyFindings)(deps.llm, result.findings, {
-        changeSummary: result.changeSummary,
-        diff: cappedDiff,
-    }, options.verifyVotes ?? 0);
+    // Both finding kinds go through the same pass: architecture findings and the
+    // ordinary code-level findings, so the general niche is just as FP-controlled.
+    const votes = options.verifyVotes ?? 0;
+    const verifyCtx = { changeSummary: result.changeSummary, diff: cappedDiff };
+    const [arch, general] = await Promise.all([
+        (0, verify_js_1.verifyFindings)(deps.llm, result.findings, verifyCtx, votes),
+        (0, verify_js_1.verifyGeneralFindings)(deps.llm, result.generalFindings, verifyCtx, votes),
+    ]);
     return {
-        result: { ...result, findings: kept },
+        result: { ...result, findings: arch.kept, generalFindings: general.kept },
         dimensions,
         relatedFiles,
-        droppedFindings: dropped,
+        droppedFindings: arch.dropped,
+        droppedGeneralFindings: general.dropped,
     };
 }
 /**
@@ -36124,7 +36133,7 @@ function sanitizeDimensions(ids) {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.reviewResultJsonSchema = exports.ReviewResultSchema = exports.OverallRiskSchema = exports.FindingSchema = exports.FindingTypeSchema = exports.SeveritySchema = void 0;
+exports.reviewResultJsonSchema = exports.ReviewResultSchema = exports.OverallRiskSchema = exports.GeneralFindingSchema = exports.FindingSchema = exports.FindingTypeSchema = exports.SeveritySchema = void 0;
 const zod_1 = __nccwpck_require__(924);
 /**
  * The shape of a single review finding. Types are inferred from these Zod
@@ -36158,6 +36167,28 @@ exports.FindingSchema = zod_1.z.object({
     /** Honest cost/benefit of the proposed solution. */
     tradeoffs: zod_1.z.string().min(1),
 });
+/**
+ * An *ordinary* code-level finding — the kind any competent general reviewer
+ * would catch: a concrete correctness/logic bug, an off-by-one, a mishandled
+ * edge case, a swallowed error at the code level. Deliberately NOT the four-段式
+ * architecture write-up: these don't warrant root-cause / architectural-solution
+ * reasoning, they just need to be flagged with a fix. BanGD surfaces these so it
+ * also covers the general-reviewer niche, while its architecture findings remain
+ * the differentiator. See DESIGN.md §一/§七.
+ */
+exports.GeneralFindingSchema = zod_1.z.object({
+    file: zod_1.z.string().min(1),
+    line: zod_1.z.number().int().nonnegative().nullable(),
+    severity: exports.SeveritySchema,
+    /** Short label, e.g. 逻辑错误 / 边界条件 / 错误处理 / 空指针 / 资源未释放. */
+    category: zod_1.z.string().min(1),
+    /** One-line summary of the problem. */
+    title: zod_1.z.string().min(1),
+    /** What is wrong and the diff evidence for it. */
+    description: zod_1.z.string().min(1),
+    /** The ordinary (non-architectural) fix. */
+    suggestion: zod_1.z.string().min(1),
+});
 exports.OverallRiskSchema = zod_1.z.enum(['高', '中', '低']);
 exports.ReviewResultSchema = zod_1.z.object({
     /** PR 变更总结：这个 PR 从数据库架构视角改了什么、动机是什么。 */
@@ -36166,6 +36197,9 @@ exports.ReviewResultSchema = zod_1.z.object({
     overallRisk: exports.OverallRiskSchema,
     /** 风险代码识别 + 每条的 Review 建议（架构级方案）。 */
     findings: zod_1.z.array(exports.FindingSchema),
+    /** 普通代码级问题（bug/逻辑/边界等），占领通用评审生态位。默认空数组：
+     * 模型遗漏该字段时不应让整条评审降级为解析失败。 */
+    generalFindings: zod_1.z.array(exports.GeneralFindingSchema).default([]),
 });
 /**
  * JSON Schema mirror of `ReviewResultSchema`, used as the `input_schema` of the
@@ -36176,7 +36210,7 @@ exports.ReviewResultSchema = zod_1.z.object({
 exports.reviewResultJsonSchema = {
     type: 'object',
     additionalProperties: false,
-    required: ['changeSummary', 'overallRisk', 'findings'],
+    required: ['changeSummary', 'overallRisk', 'findings', 'generalFindings'],
     properties: {
         changeSummary: { type: 'string' },
         overallRisk: { type: 'string', enum: exports.OverallRiskSchema.options },
@@ -36204,6 +36238,23 @@ exports.reviewResultJsonSchema = {
                     whyLowEffortInsufficient: { type: 'string' },
                     architecturalSolution: { type: 'string' },
                     tradeoffs: { type: 'string' },
+                },
+            },
+        },
+        generalFindings: {
+            type: 'array',
+            items: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['file', 'line', 'severity', 'category', 'title', 'description', 'suggestion'],
+                properties: {
+                    file: { type: 'string' },
+                    line: { type: ['integer', 'null'] },
+                    severity: { type: 'string', enum: exports.SeveritySchema.options },
+                    category: { type: 'string' },
+                    title: { type: 'string' },
+                    description: { type: 'string' },
+                    suggestion: { type: 'string' },
                 },
             },
         },
@@ -36271,6 +36322,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.VERDICT_SCHEMA = void 0;
 exports.verifyFinding = verifyFinding;
 exports.verifyFindings = verifyFindings;
+exports.verifyGeneralFindings = verifyGeneralFindings;
 const context_js_1 = __nccwpck_require__(8480);
 /** JSON Schema for one refuter's verdict. */
 exports.VERDICT_SCHEMA = {
@@ -36293,7 +36345,17 @@ const REFUTER_SYSTEM = [
     '若证据不足以确认它是一个真实的、由该 diff 引入的问题，请判为 refuted=true。',
     '在 reason 里用一句话说明你判定成立或误报的依据。',
 ].join('\n');
-function refuterUser(finding, ctx) {
+const GENERAL_REFUTER_SYSTEM = [
+    '你是一个挑剔的资深代码评审「复核者」。',
+    '下面是另一位评审者对某 PR 提出的一条**普通代码级问题**（bug / 逻辑 / 边界 / 错误处理等）。',
+    '请独立、对抗式地判断：这条问题是否站得住脚——即「确实是本次 diff 引入或暴露的、真实的正确性/逻辑缺陷」，',
+    '还是一个**误报**（无 diff 依据 / 与改动无关 / 误读代码 / 把正常写法当成 bug / 只是风格或主观偏好）。',
+    '只依据给到的 diff 与变更总结判断，不要臆测 diff 之外的事实。',
+    '若证据不足以确认它是一个真实的、由该 diff 引入或暴露的缺陷，请判为 refuted=true。',
+    '在 reason 里用一句话说明你判定成立或误报的依据。',
+].join('\n');
+/** Prepends the shared change-context preamble to an item-specific tail. */
+function withContext(ctx, tail) {
     return [
         '# 变更总结',
         ctx.changeSummary,
@@ -36302,23 +36364,33 @@ function refuterUser(finding, ctx) {
         (0, context_js_1.truncate)(ctx.diff, VERIFY_DIFF_CAP).text,
         '```',
         '# 待复核的问题',
+        ...tail,
+        '请判断这条问题是否为误报（refuted）。',
+    ].join('\n\n');
+}
+function refuterUser(finding, ctx) {
+    return withContext(ctx, [
         `文件：${finding.file}${finding.line === null ? '' : `:${finding.line}`}`,
         `类型：${finding.type}｜严重度：${finding.severity}`,
         `问题根因：${finding.rootCause}`,
         `为什么低级解法不够：${finding.whyLowEffortInsufficient}`,
         `架构级方案：${finding.architecturalSolution}`,
         `代价/收益：${finding.tradeoffs}`,
-        '请判断这条问题是否为误报（refuted）。',
-    ].join('\n\n');
+    ]);
+}
+function generalRefuterUser(finding, ctx) {
+    return withContext(ctx, [
+        `文件：${finding.file}${finding.line === null ? '' : `:${finding.line}`}`,
+        `类别：${finding.category}｜严重度：${finding.severity}`,
+        `标题：${finding.title}`,
+        `描述：${finding.description}`,
+        `建议：${finding.suggestion}`,
+    ]);
 }
 /** Run one refuter; a failed/unparseable vote counts as NOT refuted. */
-async function refuteOnce(llm, finding, ctx) {
+async function refuteOnce(llm, system, user) {
     try {
-        const raw = await llm.generateStructured({
-            system: REFUTER_SYSTEM,
-            user: refuterUser(finding, ctx),
-            outputSchema: exports.VERDICT_SCHEMA,
-        });
+        const raw = await llm.generateStructured({ system, user, outputSchema: exports.VERDICT_SCHEMA });
         return raw.refuted === true;
     }
     catch {
@@ -36326,27 +36398,39 @@ async function refuteOnce(llm, finding, ctx) {
     }
 }
 /**
- * Verify one finding with `votes` independent refuters. Dropped only on a strict
+ * Verify one item with `votes` independent refuters. Dropped only on a strict
  * majority refute (refutedCount > votes/2), so a single skeptic can't veto a real
- * finding and a tie keeps the finding.
+ * finding and a tie keeps the item.
  */
-async function verifyFinding(llm, finding, ctx, votes) {
-    const verdicts = await Promise.all(Array.from({ length: votes }, () => refuteOnce(llm, finding, ctx)));
+async function verifyItem(llm, item, ctx, votes, system, renderUser) {
+    const verdicts = await Promise.all(Array.from({ length: votes }, () => refuteOnce(llm, system, renderUser(item, ctx))));
     const refuted = verdicts.filter(Boolean).length;
     return refuted > votes / 2; // true => drop (majority refuted)
 }
 /**
- * Adversarially verify every finding. With `votes <= 0` (or no findings) this is
- * a no-op that makes zero LLM calls and keeps all findings unchanged.
+ * Adversarially verify every item. With `votes <= 0` (or no items) this is a
+ * no-op that makes zero LLM calls and keeps all items unchanged.
  */
-async function verifyFindings(llm, findings, ctx, votes) {
-    if (votes <= 0 || findings.length === 0)
-        return { kept: findings, dropped: [] };
-    const dropFlags = await Promise.all(findings.map((f) => verifyFinding(llm, f, ctx, votes)));
+async function verifyItems(llm, items, ctx, votes, system, renderUser) {
+    if (votes <= 0 || items.length === 0)
+        return { kept: items, dropped: [] };
+    const dropFlags = await Promise.all(items.map((item) => verifyItem(llm, item, ctx, votes, system, renderUser)));
     const kept = [];
     const dropped = [];
-    findings.forEach((f, i) => (dropFlags[i] ? dropped : kept).push(f));
+    items.forEach((item, i) => (dropFlags[i] ? dropped : kept).push(item));
     return { kept, dropped };
+}
+/** Verify one architecture-level finding (true => drop as a majority-refuted FP). */
+function verifyFinding(llm, finding, ctx, votes) {
+    return verifyItem(llm, finding, ctx, votes, REFUTER_SYSTEM, refuterUser);
+}
+/** Adversarially verify the architecture-level findings. */
+function verifyFindings(llm, findings, ctx, votes) {
+    return verifyItems(llm, findings, ctx, votes, REFUTER_SYSTEM, refuterUser);
+}
+/** Adversarially verify the ordinary code-level findings (same majority rule). */
+function verifyGeneralFindings(llm, findings, ctx, votes) {
+    return verifyItems(llm, findings, ctx, votes, GENERAL_REFUTER_SYSTEM, generalRefuterUser);
 }
 
 
@@ -36455,25 +36539,26 @@ async function run() {
         }
         throw error;
     }
-    const { result, dimensions, relatedFiles, droppedFindings } = reviewed;
+    const { result, dimensions, relatedFiles, droppedFindings, droppedGeneralFindings } = reviewed;
+    const totalDropped = droppedFindings.length + droppedGeneralFindings.length;
     const usage = llm.usage;
     const relatedNote = relatedFiles.length > 0 ? `｜补充阅读周边文件 [${relatedFiles.join(', ')}]` : '';
-    const verifyNote = verifyVotes > 0
-        ? `｜对抗式复核 ${verifyVotes} 票/条，过滤疑似误报 ${droppedFindings.length} 条`
-        : '';
+    const verifyNote = verifyVotes > 0 ? `｜对抗式复核 ${verifyVotes} 票/条，过滤疑似误报 ${totalDropped} 条` : '';
     const footer = `本次评审消耗 token：${(0, usage_js_1.formatUsage)(usage)}｜维度 [${dimensions.join(', ')}]${relatedNote}${verifyNote}`;
     const published = await (0, publish_js_1.publishReview)(publisher, result, pr.number, footer);
     core.setOutput('finding_count', result.findings.length);
+    core.setOutput('general_finding_count', result.generalFindings.length);
     core.setOutput('total_tokens', (0, usage_js_1.totalTokens)(usage));
-    core.setOutput('dropped_count', droppedFindings.length);
-    core.info(`BanGD 评审完成，维度=[${dimensions.join(', ')}]，共 ${result.findings.length} 条 finding` +
-        `（对抗式复核过滤 ${droppedFindings.length} 条疑似误报）；` +
+    core.setOutput('dropped_count', totalDropped);
+    core.info(`BanGD 评审完成，维度=[${dimensions.join(', ')}]，共 ${result.findings.length} 条架构 finding、` +
+        `${result.generalFindings.length} 条普通问题` +
+        `（对抗式复核过滤 ${totalDropped} 条疑似误报）；` +
         `补充阅读周边文件 ${relatedFiles.length} 个${relatedFiles.length > 0 ? ` [${relatedFiles.join(', ')}]` : ''}；` +
         `新建 Issue ${published.created} 个，复用 ${published.reused} 个${published.degraded ? '（部分降级为内联）' : ''}。`);
     core.info(`Token 用量：${(0, usage_js_1.formatUsage)(usage)}`);
     await core.summary
         .addHeading('BanGD 评审', 3)
-        .addRaw(`维度：${dimensions.join(', ')}；finding：${result.findings.length}；`)
+        .addRaw(`维度：${dimensions.join(', ')}；架构 finding：${result.findings.length}；普通问题：${result.generalFindings.length}；`)
         .addRaw(`新建 Issue ${published.created}，复用 ${published.reused}。`)
         .addRaw(`\n\nToken 用量：${(0, usage_js_1.formatUsage)(usage)}`)
         .write();
@@ -36516,6 +36601,19 @@ function formatFinding(f) {
         `**代价/收益**：${f.tradeoffs}`,
     ].join('\n\n');
 }
+/**
+ * One ordinary code-level finding, rendered inline in the PR comment. Unlike
+ * architecture findings these are not filed as issues (they are ephemeral bug
+ * flags, not tracked design problems) — just a compact one-liner + fix.
+ */
+function formatGeneralFinding(f) {
+    const where = f.line === null ? f.file : `${f.file}:${f.line}`;
+    return [
+        `${SEVERITY_EMOJI[f.severity]} **[${f.severity} · ${f.category}] \`${where}\`** ${f.title}`,
+        `  - ${f.description}`,
+        `  - **建议**：${f.suggestion}`,
+    ].join('\n');
+}
 /** Title for the issue that tracks a problem group. */
 function formatIssueTitle(group) {
     const first = group.findings[0];
@@ -36553,24 +36651,35 @@ function formatSummaryComment(result, items, footer) {
         '## 🐯 BanGD 数据库内核评审',
         `**整体风险**：${RISK_EMOJI[result.overallRisk]} ${result.overallRisk}`,
         `**变更总结**：${result.changeSummary}`,
-        `> 本评审不阻塞合入；架构级建议以 Issue 形式跟踪。`,
+        `> 本评审不阻塞合入；架构级建议以 Issue 形式跟踪，普通问题在下方内联列出。`,
     ].join('\n\n');
     const foot = footer ? `\n\n---\n\n<sub>${footer}</sub>` : '';
+    const sections = [];
     if (items.length === 0) {
-        return `${head}\n\n未发现需要从架构层面改进的问题。${foot}`;
+        sections.push('未发现需要从架构层面改进的问题。');
     }
-    const list = items
-        .map((item) => {
-        const first = item.group.findings[0];
-        const label = first ? `[${first.type}] \`${first.file}\`` : item.group.fullKey;
-        if (item.url)
-            return `- ${label} → ${item.url}`;
-        // Issue creation failed: inline the detail so the analysis isn't lost.
-        const detail = item.group.findings.map((f) => formatFinding(f)).join('\n\n');
-        return `- ${label}（建 Issue 失败，详情见下）\n\n${detail}`;
-    })
-        .join('\n');
-    return `${head}\n\n### 架构问题（共 ${items.length} 项）\n\n${list}${foot}`;
+    else {
+        const list = items
+            .map((item) => {
+            const first = item.group.findings[0];
+            const label = first ? `[${first.type}] \`${first.file}\`` : item.group.fullKey;
+            if (item.url)
+                return `- ${label} → ${item.url}`;
+            // Issue creation failed: inline the detail so the analysis isn't lost.
+            const detail = item.group.findings.map((f) => formatFinding(f)).join('\n\n');
+            return `- ${label}（建 Issue 失败，详情见下）\n\n${detail}`;
+        })
+            .join('\n');
+        sections.push(`### 架构问题（共 ${items.length} 项）\n\n${list}`);
+    }
+    // Ordinary code-level findings (the general-reviewer niche): listed inline,
+    // not filed as issues. Omitted entirely when there are none.
+    const general = result.generalFindings;
+    if (general.length > 0) {
+        const list = general.map((f) => formatGeneralFinding(f)).join('\n\n');
+        sections.push(`### 普通问题（共 ${general.length} 项）\n\n${list}`);
+    }
+    return `${head}\n\n${sections.join('\n\n')}${foot}`;
 }
 
 
@@ -36836,7 +36945,9 @@ async function loadPromptTexts(promptsDir) {
     await Promise.all(dimensions_js_1.DIMENSIONS.filter((d) => d.exampleFile).map(async (d) => {
         examples[d.id] = await (0, promises_1.readFile)((0, node_path_1.join)(dir, 'examples', d.exampleFile), 'utf8');
     }));
-    return { systemPrompt, rubric, examples };
+    // Always-on (not dimension-gated): the generalFindings exemplar.
+    const generalExample = await (0, promises_1.readFile)((0, node_path_1.join)(dir, 'examples', 'general-findings.md'), 'utf8');
+    return { systemPrompt, rubric, examples, generalExample };
 }
 /**
  * Find the prompts/ directory by ascending from this module's location until a

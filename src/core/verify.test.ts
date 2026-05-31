@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { LlmClient, LlmRequest } from './ports.js';
-import type { Finding } from './schema.js';
-import { verifyFinding, verifyFindings, VERDICT_SCHEMA } from './verify.js';
+import type { Finding, GeneralFinding } from './schema.js';
+import { verifyFinding, verifyFindings, verifyGeneralFindings, VERDICT_SCHEMA } from './verify.js';
 
 function finding(file: string): Finding {
   return {
@@ -13,6 +13,18 @@ function finding(file: string): Finding {
     whyLowEffortInsufficient: '加锁会串行化热路径',
     architecturalSolution: '读写分离的双表设计',
     tradeoffs: '实现复杂度上升',
+  };
+}
+
+function generalFinding(file: string): GeneralFinding {
+  return {
+    file,
+    line: 20,
+    severity: '重要',
+    category: '边界条件',
+    title: '计数溢出',
+    description: 'int32 自增可能回绕',
+    suggestion: '改用 int64',
   };
 }
 
@@ -100,6 +112,38 @@ describe('verifyFindings', () => {
     const generateStructured = vi.fn(() => Promise.resolve({ refuted: true, reason: 'x' }));
     const out = await verifyFindings({ generateStructured }, [], ctx, 3);
     expect(out).toEqual({ kept: [], dropped: [] });
+    expect(generateStructured).not.toHaveBeenCalled();
+  });
+});
+
+describe('verifyGeneralFindings', () => {
+  it('partitions general findings by majority refute and sends their details', async () => {
+    let seen: LlmRequest | undefined;
+    // Refute only findings in b.go.
+    const llm: LlmClient = {
+      generateStructured: (r: LlmRequest) => {
+        seen = r;
+        return Promise.resolve({ refuted: r.user.includes('b.go'), reason: 'x' });
+      },
+    };
+    const { kept, dropped } = await verifyGeneralFindings(
+      llm,
+      [generalFinding('a.go'), generalFinding('b.go')],
+      ctx,
+      3,
+    );
+    expect(kept.map((f) => f.file)).toEqual(['a.go']);
+    expect(dropped.map((f) => f.file)).toEqual(['b.go']);
+    // The general-finding fields reach the refuter (title/category/description).
+    expect(seen?.user).toContain('计数溢出');
+    expect(seen?.user).toContain('边界条件');
+  });
+
+  it('is a no-op (zero LLM calls) when votes <= 0', async () => {
+    const generateStructured = vi.fn(() => Promise.resolve({ refuted: true, reason: 'x' }));
+    const findings = [generalFinding('a.go')];
+    const out = await verifyGeneralFindings({ generateStructured }, findings, ctx, 0);
+    expect(out).toEqual({ kept: findings, dropped: [] });
     expect(generateStructured).not.toHaveBeenCalled();
   });
 });

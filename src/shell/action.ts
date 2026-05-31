@@ -69,31 +69,32 @@ export async function run(): Promise<void> {
     }
     throw error;
   }
-  const { result, dimensions, relatedFiles, droppedFindings } = reviewed;
+  const { result, dimensions, relatedFiles, droppedFindings, droppedGeneralFindings } = reviewed;
+  const totalDropped = droppedFindings.length + droppedGeneralFindings.length;
 
   const usage = llm.usage;
   const relatedNote = relatedFiles.length > 0 ? `｜补充阅读周边文件 [${relatedFiles.join(', ')}]` : '';
   const verifyNote =
-    verifyVotes > 0
-      ? `｜对抗式复核 ${verifyVotes} 票/条，过滤疑似误报 ${droppedFindings.length} 条`
-      : '';
+    verifyVotes > 0 ? `｜对抗式复核 ${verifyVotes} 票/条，过滤疑似误报 ${totalDropped} 条` : '';
   const footer = `本次评审消耗 token：${formatUsage(usage)}｜维度 [${dimensions.join(', ')}]${relatedNote}${verifyNote}`;
 
   const published = await publishReview(publisher, result, pr.number, footer);
 
   core.setOutput('finding_count', result.findings.length);
+  core.setOutput('general_finding_count', result.generalFindings.length);
   core.setOutput('total_tokens', totalTokens(usage));
-  core.setOutput('dropped_count', droppedFindings.length);
+  core.setOutput('dropped_count', totalDropped);
   core.info(
-    `BanGD 评审完成，维度=[${dimensions.join(', ')}]，共 ${result.findings.length} 条 finding` +
-      `（对抗式复核过滤 ${droppedFindings.length} 条疑似误报）；` +
+    `BanGD 评审完成，维度=[${dimensions.join(', ')}]，共 ${result.findings.length} 条架构 finding、` +
+      `${result.generalFindings.length} 条普通问题` +
+      `（对抗式复核过滤 ${totalDropped} 条疑似误报）；` +
       `补充阅读周边文件 ${relatedFiles.length} 个${relatedFiles.length > 0 ? ` [${relatedFiles.join(', ')}]` : ''}；` +
       `新建 Issue ${published.created} 个，复用 ${published.reused} 个${published.degraded ? '（部分降级为内联）' : ''}。`,
   );
   core.info(`Token 用量：${formatUsage(usage)}`);
   await core.summary
     .addHeading('BanGD 评审', 3)
-    .addRaw(`维度：${dimensions.join(', ')}；finding：${result.findings.length}；`)
+    .addRaw(`维度：${dimensions.join(', ')}；架构 finding：${result.findings.length}；普通问题：${result.generalFindings.length}；`)
     .addRaw(`新建 Issue ${published.created}，复用 ${published.reused}。`)
     .addRaw(`\n\nToken 用量：${formatUsage(usage)}`)
     .write();

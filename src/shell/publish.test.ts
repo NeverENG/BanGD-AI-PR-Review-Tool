@@ -17,7 +17,7 @@ function finding(over: Partial<Finding> = {}): Finding {
 }
 
 function result(findings: Finding[]): ReviewResult {
-  return { changeSummary: 's', overallRisk: '高', findings };
+  return { changeSummary: 's', overallRisk: '高', findings, generalFindings: [] };
 }
 
 function fakePublisher(over: Partial<ReviewPublisher> = {}): {

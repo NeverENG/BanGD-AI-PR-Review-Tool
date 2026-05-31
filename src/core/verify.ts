@@ -19,7 +19,7 @@
  * concurrently.
  */
 import type { LlmClient } from './ports.js';
-import type { Finding } from './schema.js';
+import type { Finding, GeneralFinding } from './schema.js';
 import { truncate } from './context.js';
 
 /** JSON Schema for one refuter's verdict. */
@@ -41,12 +41,15 @@ export interface VerifyContext {
   diff: string;
 }
 
-export interface VerifyOutcome {
-  /** Findings that survived the adversarial pass (majority did NOT refute). */
-  kept: Finding[];
-  /** Findings dropped as likely false positives (majority refuted). */
-  dropped: Finding[];
+export interface VerifyOutcome<T> {
+  /** Items that survived the adversarial pass (majority did NOT refute). */
+  kept: T[];
+  /** Items dropped as likely false positives (majority refuted). */
+  dropped: T[];
 }
+
+/** Renders one item into the refuter's user message (item-type specific). */
+type RefuterUser<T> = (item: T, ctx: VerifyContext) => string;
 
 const REFUTER_SYSTEM = [
   '你是一个挑剔的资深数据库内核评审「复核者」。',
@@ -58,7 +61,18 @@ const REFUTER_SYSTEM = [
   '在 reason 里用一句话说明你判定成立或误报的依据。',
 ].join('\n');
 
-function refuterUser(finding: Finding, ctx: VerifyContext): string {
+const GENERAL_REFUTER_SYSTEM = [
+  '你是一个挑剔的资深代码评审「复核者」。',
+  '下面是另一位评审者对某 PR 提出的一条**普通代码级问题**（bug / 逻辑 / 边界 / 错误处理等）。',
+  '请独立、对抗式地判断：这条问题是否站得住脚——即「确实是本次 diff 引入或暴露的、真实的正确性/逻辑缺陷」，',
+  '还是一个**误报**（无 diff 依据 / 与改动无关 / 误读代码 / 把正常写法当成 bug / 只是风格或主观偏好）。',
+  '只依据给到的 diff 与变更总结判断，不要臆测 diff 之外的事实。',
+  '若证据不足以确认它是一个真实的、由该 diff 引入或暴露的缺陷，请判为 refuted=true。',
+  '在 reason 里用一句话说明你判定成立或误报的依据。',
+].join('\n');
+
+/** Prepends the shared change-context preamble to an item-specific tail. */
+function withContext(ctx: VerifyContext, tail: string[]): string {
   return [
     '# 变更总结',
     ctx.changeSummary,
@@ -67,24 +81,36 @@ function refuterUser(finding: Finding, ctx: VerifyContext): string {
     truncate(ctx.diff, VERIFY_DIFF_CAP).text,
     '```',
     '# 待复核的问题',
+    ...tail,
+    '请判断这条问题是否为误报（refuted）。',
+  ].join('\n\n');
+}
+
+function refuterUser(finding: Finding, ctx: VerifyContext): string {
+  return withContext(ctx, [
     `文件：${finding.file}${finding.line === null ? '' : `:${finding.line}`}`,
     `类型：${finding.type}｜严重度：${finding.severity}`,
     `问题根因：${finding.rootCause}`,
     `为什么低级解法不够：${finding.whyLowEffortInsufficient}`,
     `架构级方案：${finding.architecturalSolution}`,
     `代价/收益：${finding.tradeoffs}`,
-    '请判断这条问题是否为误报（refuted）。',
-  ].join('\n\n');
+  ]);
+}
+
+function generalRefuterUser(finding: GeneralFinding, ctx: VerifyContext): string {
+  return withContext(ctx, [
+    `文件：${finding.file}${finding.line === null ? '' : `:${finding.line}`}`,
+    `类别：${finding.category}｜严重度：${finding.severity}`,
+    `标题：${finding.title}`,
+    `描述：${finding.description}`,
+    `建议：${finding.suggestion}`,
+  ]);
 }
 
 /** Run one refuter; a failed/unparseable vote counts as NOT refuted. */
-async function refuteOnce(llm: LlmClient, finding: Finding, ctx: VerifyContext): Promise<boolean> {
+async function refuteOnce(llm: LlmClient, system: string, user: string): Promise<boolean> {
   try {
-    const raw = await llm.generateStructured({
-      system: REFUTER_SYSTEM,
-      user: refuterUser(finding, ctx),
-      outputSchema: VERDICT_SCHEMA,
-    });
+    const raw = await llm.generateStructured({ system, user, outputSchema: VERDICT_SCHEMA });
     return (raw as { refuted?: unknown }).refuted === true;
   } catch {
     return false;
@@ -92,40 +118,74 @@ async function refuteOnce(llm: LlmClient, finding: Finding, ctx: VerifyContext):
 }
 
 /**
- * Verify one finding with `votes` independent refuters. Dropped only on a strict
+ * Verify one item with `votes` independent refuters. Dropped only on a strict
  * majority refute (refutedCount > votes/2), so a single skeptic can't veto a real
- * finding and a tie keeps the finding.
+ * finding and a tie keeps the item.
  */
-export async function verifyFinding(
+async function verifyItem<T>(
   llm: LlmClient,
-  finding: Finding,
+  item: T,
   ctx: VerifyContext,
   votes: number,
+  system: string,
+  renderUser: RefuterUser<T>,
 ): Promise<boolean> {
   const verdicts = await Promise.all(
-    Array.from({ length: votes }, () => refuteOnce(llm, finding, ctx)),
+    Array.from({ length: votes }, () => refuteOnce(llm, system, renderUser(item, ctx))),
   );
   const refuted = verdicts.filter(Boolean).length;
   return refuted > votes / 2; // true => drop (majority refuted)
 }
 
 /**
- * Adversarially verify every finding. With `votes <= 0` (or no findings) this is
- * a no-op that makes zero LLM calls and keeps all findings unchanged.
+ * Adversarially verify every item. With `votes <= 0` (or no items) this is a
+ * no-op that makes zero LLM calls and keeps all items unchanged.
  */
-export async function verifyFindings(
+async function verifyItems<T>(
+  llm: LlmClient,
+  items: T[],
+  ctx: VerifyContext,
+  votes: number,
+  system: string,
+  renderUser: RefuterUser<T>,
+): Promise<VerifyOutcome<T>> {
+  if (votes <= 0 || items.length === 0) return { kept: items, dropped: [] };
+
+  const dropFlags = await Promise.all(
+    items.map((item) => verifyItem(llm, item, ctx, votes, system, renderUser)),
+  );
+  const kept: T[] = [];
+  const dropped: T[] = [];
+  items.forEach((item, i) => (dropFlags[i] ? dropped : kept).push(item));
+  return { kept, dropped };
+}
+
+/** Verify one architecture-level finding (true => drop as a majority-refuted FP). */
+export function verifyFinding(
+  llm: LlmClient,
+  finding: Finding,
+  ctx: VerifyContext,
+  votes: number,
+): Promise<boolean> {
+  return verifyItem(llm, finding, ctx, votes, REFUTER_SYSTEM, refuterUser);
+}
+
+/** Adversarially verify the architecture-level findings. */
+export function verifyFindings(
   llm: LlmClient,
   findings: Finding[],
   ctx: VerifyContext,
   votes: number,
-): Promise<VerifyOutcome> {
-  if (votes <= 0 || findings.length === 0) return { kept: findings, dropped: [] };
+): Promise<VerifyOutcome<Finding>> {
+  return verifyItems(llm, findings, ctx, votes, REFUTER_SYSTEM, refuterUser);
+}
 
-  const dropFlags = await Promise.all(
-    findings.map((f) => verifyFinding(llm, f, ctx, votes)),
-  );
-  const kept: Finding[] = [];
-  const dropped: Finding[] = [];
-  findings.forEach((f, i) => (dropFlags[i] ? dropped : kept).push(f));
-  return { kept, dropped };
+/** Adversarially verify the ordinary code-level findings (same majority rule). */
+export function verifyGeneralFindings(
+  llm: LlmClient,
+  findings: GeneralFinding[],
+  ctx: VerifyContext,
+  votes: number,
+): Promise<VerifyOutcome<GeneralFinding>> {
+  return verifyItems(llm, findings, ctx, votes, GENERAL_REFUTER_SYSTEM, generalRefuterUser);
 }

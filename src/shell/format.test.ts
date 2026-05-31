@@ -25,7 +25,18 @@ const result: ReviewResult = {
   changeSummary: '在读路径新增命中计数',
   overallRisk: '高',
   findings: [finding],
+  generalFindings: [],
 };
+
+const generalFinding = {
+  file: 'cache/block.go',
+  line: 20,
+  severity: '重要',
+  category: '边界条件',
+  title: '计数溢出未处理',
+  description: 'hits 为 int32，热路径自增可能回绕',
+  suggestion: '改用 int64 或饱和加法',
+} as const;
 
 describe('formatIssueBody / formatIssueTitle', () => {
   const group = groupFindings(result.findings, 42)[0]!;
@@ -63,8 +74,36 @@ describe('formatSummaryComment', () => {
   });
 
   it('renders a clean message with no findings', () => {
-    const md = formatSummaryComment({ changeSummary: '小改动', overallRisk: '低', findings: [] }, []);
+    const md = formatSummaryComment(
+      { changeSummary: '小改动', overallRisk: '低', findings: [], generalFindings: [] },
+      [],
+    );
     expect(md).toContain('未发现需要从架构层面改进的问题');
+  });
+
+  it('lists general findings inline (with no architecture findings)', () => {
+    const md = formatSummaryComment(
+      { changeSummary: '小改动', overallRisk: '低', findings: [], generalFindings: [generalFinding] },
+      [],
+    );
+    expect(md).toContain('未发现需要从架构层面改进的问题');
+    expect(md).toContain('普通问题（共 1 项）');
+    expect(md).toContain('边界条件');
+    expect(md).toContain('计数溢出未处理');
+    expect(md).toContain('改用 int64 或饱和加法');
+  });
+
+  it('renders both architecture and general sections together', () => {
+    const items: CommentItem[] = [{ group: groupFindings(result.findings, 42)[0]!, url: 'https://x/issues/9' }];
+    const md = formatSummaryComment({ ...result, generalFindings: [generalFinding] }, items);
+    expect(md).toContain('架构问题（共 1 项）');
+    expect(md).toContain('普通问题（共 1 项）');
+  });
+
+  it('omits the general section entirely when there are none', () => {
+    const items: CommentItem[] = [{ group: groupFindings(result.findings, 42)[0]!, url: 'https://x/issues/9' }];
+    const md = formatSummaryComment(result, items);
+    expect(md).not.toContain('### 普通问题');
   });
 
   it('formatDegradedComment carries the marker, a non-blocking note, and the raw snippet', () => {
@@ -77,7 +116,7 @@ describe('formatSummaryComment', () => {
 
   it('appends the footer (e.g. token usage) when provided', () => {
     const md = formatSummaryComment(
-      { changeSummary: 's', overallRisk: '低', findings: [] },
+      { changeSummary: 's', overallRisk: '低', findings: [], generalFindings: [] },
       [],
       '本次评审消耗 token：共 117 tokens',
     );
