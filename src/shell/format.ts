@@ -1,4 +1,4 @@
-import type { ReviewResult, Finding } from '../core/schema.js';
+import type { ReviewResult, Finding, GeneralFinding } from '../core/schema.js';
 import type { ProblemGroup } from '../core/publish.js';
 import { SUMMARY_MARKER, issueKeyMarker } from './markers.js';
 
@@ -24,6 +24,20 @@ function formatFinding(f: Finding): string {
     `**架构级方案**：${f.architecturalSolution}`,
     `**代价/收益**：${f.tradeoffs}`,
   ].join('\n\n');
+}
+
+/**
+ * One ordinary code-level finding, rendered inline in the PR comment. Unlike
+ * architecture findings these are not filed as issues (they are ephemeral bug
+ * flags, not tracked design problems) — just a compact one-liner + fix.
+ */
+function formatGeneralFinding(f: GeneralFinding): string {
+  const where = f.line === null ? f.file : `${f.file}:${f.line}`;
+  return [
+    `${SEVERITY_EMOJI[f.severity]} **[${f.severity} · ${f.category}] \`${where}\`** ${f.title}`,
+    `  - ${f.description}`,
+    `  - **建议**：${f.suggestion}`,
+  ].join('\n');
 }
 
 /** Title for the issue that tracks a problem group. */
@@ -76,25 +90,36 @@ export function formatSummaryComment(
     '## 🐯 BanGD 数据库内核评审',
     `**整体风险**：${RISK_EMOJI[result.overallRisk]} ${result.overallRisk}`,
     `**变更总结**：${result.changeSummary}`,
-    `> 本评审不阻塞合入；架构级建议以 Issue 形式跟踪。`,
+    `> 本评审不阻塞合入；架构级建议以 Issue 形式跟踪，普通问题在下方内联列出。`,
   ].join('\n\n');
 
   const foot = footer ? `\n\n---\n\n<sub>${footer}</sub>` : '';
 
+  const sections: string[] = [];
+
   if (items.length === 0) {
-    return `${head}\n\n未发现需要从架构层面改进的问题。${foot}`;
+    sections.push('未发现需要从架构层面改进的问题。');
+  } else {
+    const list = items
+      .map((item) => {
+        const first = item.group.findings[0];
+        const label = first ? `[${first.type}] \`${first.file}\`` : item.group.fullKey;
+        if (item.url) return `- ${label} → ${item.url}`;
+        // Issue creation failed: inline the detail so the analysis isn't lost.
+        const detail = item.group.findings.map((f) => formatFinding(f)).join('\n\n');
+        return `- ${label}（建 Issue 失败，详情见下）\n\n${detail}`;
+      })
+      .join('\n');
+    sections.push(`### 架构问题（共 ${items.length} 项）\n\n${list}`);
   }
 
-  const list = items
-    .map((item) => {
-      const first = item.group.findings[0];
-      const label = first ? `[${first.type}] \`${first.file}\`` : item.group.fullKey;
-      if (item.url) return `- ${label} → ${item.url}`;
-      // Issue creation failed: inline the detail so the analysis isn't lost.
-      const detail = item.group.findings.map((f) => formatFinding(f)).join('\n\n');
-      return `- ${label}（建 Issue 失败，详情见下）\n\n${detail}`;
-    })
-    .join('\n');
+  // Ordinary code-level findings (the general-reviewer niche): listed inline,
+  // not filed as issues. Omitted entirely when there are none.
+  const general = result.generalFindings;
+  if (general.length > 0) {
+    const list = general.map((f) => formatGeneralFinding(f)).join('\n\n');
+    sections.push(`### 普通问题（共 ${general.length} 项）\n\n${list}`);
+  }
 
-  return `${head}\n\n### 架构问题（共 ${items.length} 项）\n\n${list}${foot}`;
+  return `${head}\n\n${sections.join('\n\n')}${foot}`;
 }

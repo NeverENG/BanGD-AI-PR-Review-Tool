@@ -7,13 +7,19 @@ import {
   type LoadedFile,
 } from './context.js';
 import { gatherRelatedFiles } from './related.js';
-import { verifyFindings } from './verify.js';
+import { verifyFindings, verifyGeneralFindings } from './verify.js';
 import { selectDimensionsHeuristic, sanitizeDimensions } from './router.js';
 import { ALL_DIMENSION_IDS, DIMENSIONS, type DimensionId } from './dimensions.js';
 import { withRetry } from './retry.js';
 import { InvalidModelOutputError } from './errors.js';
 import { ZodError } from 'zod';
-import { ReviewResultSchema, reviewResultJsonSchema, type ReviewResult, type Finding } from './schema.js';
+import {
+  ReviewResultSchema,
+  reviewResultJsonSchema,
+  type ReviewResult,
+  type Finding,
+  type GeneralFinding,
+} from './schema.js';
 
 /** Context budgets (chars). The diff is the primary signal and is kept (capped);
  * changed-file contents fill the remaining budget. ~chars/3-4 ≈ tokens. */
@@ -55,6 +61,8 @@ export interface ReviewOutcome {
   /** Findings dropped by the adversarial verification pass as likely false
    * positives (for observability / 误报控制 transparency). */
   droppedFindings: Finding[];
+  /** Ordinary code-level findings dropped by the same adversarial pass. */
+  droppedGeneralFindings: GeneralFinding[];
 }
 
 /**
@@ -126,16 +134,21 @@ export async function review(
 
   // Adversarial verification: drop likely false positives by majority refute
   // (no-op when verifyVotes <= 0 or there are no findings — zero extra calls).
-  const { kept, dropped } = await verifyFindings(deps.llm, result.findings, {
-    changeSummary: result.changeSummary,
-    diff: cappedDiff,
-  }, options.verifyVotes ?? 0);
+  // Both finding kinds go through the same pass: architecture findings and the
+  // ordinary code-level findings, so the general niche is just as FP-controlled.
+  const votes = options.verifyVotes ?? 0;
+  const verifyCtx = { changeSummary: result.changeSummary, diff: cappedDiff };
+  const [arch, general] = await Promise.all([
+    verifyFindings(deps.llm, result.findings, verifyCtx, votes),
+    verifyGeneralFindings(deps.llm, result.generalFindings, verifyCtx, votes),
+  ]);
 
   return {
-    result: { ...result, findings: kept },
+    result: { ...result, findings: arch.kept, generalFindings: general.kept },
     dimensions,
     relatedFiles,
-    droppedFindings: dropped,
+    droppedFindings: arch.dropped,
+    droppedGeneralFindings: general.dropped,
   };
 }
 

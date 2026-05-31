@@ -6,7 +6,7 @@ import { ALL_DIMENSION_IDS, type DimensionId } from './dimensions.js';
 import { InvalidModelOutputError } from './errors.js';
 import { RELATED_PLAN_SCHEMA } from './related.js';
 import { VERDICT_SCHEMA } from './verify.js';
-import { reviewResultJsonSchema, FindingSchema, ReviewResultSchema } from './schema.js';
+import { reviewResultJsonSchema, FindingSchema, GeneralFindingSchema, ReviewResultSchema } from './schema.js';
 
 const prompts: PromptTexts = {
   systemPrompt: 'SYSTEM',
@@ -94,6 +94,48 @@ describe('review (core orchestrator)', () => {
     expect(result.findings).toHaveLength(0);
     expect(droppedFindings).toHaveLength(1);
     expect(droppedFindings[0]?.file).toBe('cache/block.go');
+  });
+
+  it('surfaces general findings and verifies them too (drops refuted ones)', async () => {
+    const withGeneral = {
+      ...validResult,
+      generalFindings: [
+        {
+          file: 'cache/block.go',
+          line: 20,
+          severity: '重要',
+          category: '边界条件',
+          title: '计数溢出',
+          description: 'int32 自增可能回绕',
+          suggestion: '改用 int64',
+        },
+      ],
+    };
+    // Refute findings (drop), keep general findings.
+    const llm: LlmClient = {
+      generateStructured: (request: LlmRequest) => {
+        if (request.outputSchema === RELATED_PLAN_SCHEMA) return Promise.resolve({ paths: [] });
+        if (request.outputSchema === VERDICT_SCHEMA) {
+          return Promise.resolve({ refuted: request.user.includes('架构级方案'), reason: 'x' });
+        }
+        return Promise.resolve(withGeneral);
+      },
+    };
+    const { result, droppedFindings, droppedGeneralFindings } = await review(
+      { llm, pr: fakePr() },
+      prompts,
+      { verifyVotes: 1 },
+    );
+    expect(droppedFindings).toHaveLength(1); // architecture finding refuted
+    expect(droppedGeneralFindings).toHaveLength(0); // general finding kept
+    expect(result.generalFindings).toHaveLength(1);
+    expect(result.generalFindings[0]?.category).toBe('边界条件');
+  });
+
+  it('defaults generalFindings to [] when the model omits the field', async () => {
+    const deps: ReviewDeps = { llm: fakeLlm(validResult), pr: fakePr() };
+    const { result } = await review(deps, prompts);
+    expect(result.generalFindings).toEqual([]);
   });
 
   it('sends only the selected dimension rubric + matching example', async () => {
@@ -194,6 +236,14 @@ describe('reviewResultJsonSchema', () => {
     const zodKeys = Object.keys(FindingSchema.shape).sort();
     const jsonKeys = Object.keys(
       reviewResultJsonSchema.properties.findings.items.properties,
+    ).sort();
+    expect(jsonKeys).toEqual(zodKeys);
+  });
+
+  it('stays in sync with the Zod general-finding keys', () => {
+    const zodKeys = Object.keys(GeneralFindingSchema.shape).sort();
+    const jsonKeys = Object.keys(
+      reviewResultJsonSchema.properties.generalFindings.items.properties,
     ).sort();
     expect(jsonKeys).toEqual(zodKeys);
   });
