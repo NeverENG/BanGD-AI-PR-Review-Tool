@@ -3,7 +3,8 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   {
-    ignores: ['build/**', 'dist/**', 'node_modules/**'],
+    // eval/*.mjs is a one-off Node build script, not part of the typed project.
+    ignores: ['build/**', 'dist/**', 'node_modules/**', 'eval/**/*.mjs'],
   },
   ...tseslint.configs.recommendedTypeChecked,
   {
