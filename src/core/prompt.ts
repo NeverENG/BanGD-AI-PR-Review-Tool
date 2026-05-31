@@ -15,16 +15,25 @@ export interface PromptTexts {
   rubric: Record<DimensionId, string>;
   /** dimension id → prompts/examples/<file> (only dimensions that have one) */
   examples: Partial<Record<DimensionId, string>>;
+  /**
+   * prompts/examples/general-findings.md — the exemplar for `generalFindings`.
+   * Unlike the dimension examples this is NOT progressive-disclosure gated: it is
+   * always included, because every review is asked for generalFindings. It lives
+   * in the stable (prompt-cached) system block, so the marginal cost is ~nil.
+   */
+  generalExample: string;
 }
 
 /**
  * Assemble the system prompt from the persona + only the selected rubric
- * fragments and their matching examples.
+ * fragments and their matching architecture examples, plus the always-on
+ * generalFindings exemplar.
  */
 export function assembleSystemPrompt(
   systemPrompt: string,
   rubricFragments: string[],
   examples: string[],
+  generalExample = '',
 ): string {
   const parts = [systemPrompt];
   if (rubricFragments.length > 0) {
@@ -32,7 +41,10 @@ export function assembleSystemPrompt(
   }
   if (examples.length > 0) {
     const block = examples.map((ex, i) => `## 范例 ${i + 1}\n\n${ex}`).join('\n\n');
-    parts.push('# Few-shot 范例\n\n' + block);
+    parts.push('# 架构级 Few-shot 范例\n\n' + block);
+  }
+  if (generalExample) {
+    parts.push('# 普通问题 Few-shot 范例\n\n' + generalExample);
   }
   return parts.join('\n\n---\n\n');
 }

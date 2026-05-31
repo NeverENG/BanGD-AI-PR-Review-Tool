@@ -14,6 +14,7 @@ const prompts: PromptTexts = {
     ALL_DIMENSION_IDS.map((id) => [id, `RUBRIC_${id}`]),
   ) as Record<DimensionId, string>,
   examples: { concurrency: 'EXAMPLE_CONCURRENCY', storage: 'EXAMPLE_STORAGE' },
+  generalExample: 'GENERAL_EXAMPLE',
 };
 
 // Contains a concurrency keyword (`sync.`) so the heuristic router selects the
@@ -152,6 +153,8 @@ describe('review (core orchestrator)', () => {
     // A dimension that wasn't selected must not be included.
     expect(dimensions).not.toContain('schema');
     expect(seen?.system).not.toContain('RUBRIC_schema');
+    // The generalFindings exemplar is always included, regardless of dimensions.
+    expect(seen?.system).toContain('GENERAL_EXAMPLE');
     expect(seen?.user).toContain('add hit counter');
     expect(seen?.outputSchema).toBe(reviewResultJsonSchema);
   });

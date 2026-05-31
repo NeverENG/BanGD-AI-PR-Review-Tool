@@ -102,7 +102,12 @@ export async function review(
     .map((id) => prompts.examples[id])
     .filter((ex): ex is string => ex !== undefined);
 
-  const system = assembleSystemPrompt(prompts.systemPrompt, rubricFragments, examples);
+  const system = assembleSystemPrompt(
+    prompts.systemPrompt,
+    rubricFragments,
+    examples,
+    prompts.generalExample,
+  );
   const user = assembleUserPrompt(
     deps.pr.metadata,
     cappedDiff,

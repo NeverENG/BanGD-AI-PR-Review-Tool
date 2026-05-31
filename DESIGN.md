@@ -94,6 +94,7 @@ BanGD 是一个面向 **BanDB 数据库引擎（Go）垂类**的 AI PR 评审助
 设计上与架构级刻意区分：
 
 - **结构更轻**：`generalFinding` 只有 `file/line/severity/category/title/description/suggestion`（见 `src/core/schema.ts`），**不走四段式**——这些问题不值得"根因→低级解法不够→架构方案→代价/收益"的论证，指出位置 + 普通修法即可。
+- **自带 few-shot**：与每个架构维度一样，普通问题也有专门的范例（`prompts/examples/general-findings.md`），示范"该报什么"与"绝不该报什么"（红线）。它**不随维度门控**，每次评审恒定注入，落在 prompt-cache 的稳定块里，边际成本近乎为零。
 - **质量红线（写进系统提示词）**：只报**有 diff 证据、能定位具体出错点**的确凿正确性/逻辑问题；**不报**风格/命名/格式/"建议加测试"这类 nits；不与架构级 finding 重复；最多约 6 条，没有就返回空数组。红线的目的是**不让 BanGD 沦为嘈杂的通用 linter**——宁缺毋滥。
 - **同样经过对抗式复核**：`generalFindings` 与 `findings` 走同一套多反驳者、严格多数否决的验证（`verifyGeneralFindings`，反驳提示词换成"是否为真实正确性缺陷"），把普通级误报也压下去。
 - **投递方式不同**：架构问题以 **Issue** 跟踪（是需长期跟进的设计问题）；普通问题**只在 PR 汇总评论里内联列出**（是即时的 bug 提示，随 diff 失效，不必建 Issue）。

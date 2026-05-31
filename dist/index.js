@@ -35720,16 +35720,20 @@ exports.assembleSystemPrompt = assembleSystemPrompt;
 exports.assembleUserPrompt = assembleUserPrompt;
 /**
  * Assemble the system prompt from the persona + only the selected rubric
- * fragments and their matching examples.
+ * fragments and their matching architecture examples, plus the always-on
+ * generalFindings exemplar.
  */
-function assembleSystemPrompt(systemPrompt, rubricFragments, examples) {
+function assembleSystemPrompt(systemPrompt, rubricFragments, examples, generalExample = '') {
     const parts = [systemPrompt];
     if (rubricFragments.length > 0) {
         parts.push('# 评审 Rubric（仅与本 PR 相关的维度）\n\n' + rubricFragments.join('\n\n'));
     }
     if (examples.length > 0) {
         const block = examples.map((ex, i) => `## 范例 ${i + 1}\n\n${ex}`).join('\n\n');
-        parts.push('# Few-shot 范例\n\n' + block);
+        parts.push('# 架构级 Few-shot 范例\n\n' + block);
+    }
+    if (generalExample) {
+        parts.push('# 普通问题 Few-shot 范例\n\n' + generalExample);
     }
     return parts.join('\n\n---\n\n');
 }
@@ -36006,7 +36010,7 @@ async function review(deps, prompts, options = {}) {
     const examples = dimensions
         .map((id) => prompts.examples[id])
         .filter((ex) => ex !== undefined);
-    const system = (0, prompt_js_1.assembleSystemPrompt)(prompts.systemPrompt, rubricFragments, examples);
+    const system = (0, prompt_js_1.assembleSystemPrompt)(prompts.systemPrompt, rubricFragments, examples, prompts.generalExample);
     const user = (0, prompt_js_1.assembleUserPrompt)(deps.pr.metadata, cappedDiff, filesBlock.text, relatedBlock.text);
     const relatedFiles = related.map((f) => f.path);
     // The client returns the model's output unvalidated; the core owns the
@@ -36941,7 +36945,9 @@ async function loadPromptTexts(promptsDir) {
     await Promise.all(dimensions_js_1.DIMENSIONS.filter((d) => d.exampleFile).map(async (d) => {
         examples[d.id] = await (0, promises_1.readFile)((0, node_path_1.join)(dir, 'examples', d.exampleFile), 'utf8');
     }));
-    return { systemPrompt, rubric, examples };
+    // Always-on (not dimension-gated): the generalFindings exemplar.
+    const generalExample = await (0, promises_1.readFile)((0, node_path_1.join)(dir, 'examples', 'general-findings.md'), 'utf8');
+    return { systemPrompt, rubric, examples, generalExample };
 }
 /**
  * Find the prompts/ directory by ascending from this module's location until a

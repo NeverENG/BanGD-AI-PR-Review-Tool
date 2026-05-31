@@ -29,7 +29,10 @@ export async function loadPromptTexts(promptsDir?: string): Promise<PromptTexts>
     }),
   );
 
-  return { systemPrompt, rubric, examples };
+  // Always-on (not dimension-gated): the generalFindings exemplar.
+  const generalExample = await readFile(join(dir, 'examples', 'general-findings.md'), 'utf8');
+
+  return { systemPrompt, rubric, examples, generalExample };
 }
 
 /**
