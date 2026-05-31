@@ -119,6 +119,7 @@ function withContext(ctx: VerifyContext, tail: string[]): string {
 
 function refuterUser(finding: Finding, ctx: VerifyContext): string {
   return withContext(ctx, [
+    ...(finding.title ? [`标题：${finding.title}`] : []),
     `文件：${finding.file}${finding.line === null ? '' : `:${finding.line}`}`,
     `类型：${finding.type}｜严重度：${finding.severity}`,
     `问题根因：${finding.rootCause}`,

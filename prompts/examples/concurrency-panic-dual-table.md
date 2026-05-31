@@ -35,6 +35,7 @@ CI 偶发崩溃：`fatal error: concurrent map read and map write`，以及 `hit
 
 ## BanGD 的理想评审
 
+- **标题**：读热路径混入可变共享统计状态
 - **位置**：`cache/block.go` `BlockCache.Get`
 - **严重度**：阻塞
 - **类型**：并发 / 内存

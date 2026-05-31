@@ -46,6 +46,7 @@ const validResult = {
       line: 12,
       severity: '阻塞',
       type: '并发',
+      title: '读路径无同步自增 hits 计数',
       rootCause: '所有权模型错误',
       whyLowEffortInsufficient: '加锁会串行化热路径',
       architecturalSolution: '读写分离的双表设计',

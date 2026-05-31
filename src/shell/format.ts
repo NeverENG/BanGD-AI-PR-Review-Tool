@@ -14,11 +14,20 @@ const RISK_EMOJI: Record<ReviewResult['overallRisk'], string> = {
   低: '🟢',
 };
 
+/** Basename of a repo path (e.g. `storage/zstorage/memtable.go` → `memtable.go`). */
+function baseName(file: string): string {
+  return file.split('/').pop() || file;
+}
+
 /** The four-part architecture write-up for a single finding. */
 function formatFinding(f: Finding): string {
   const where = f.line === null ? f.file : `${f.file}:${f.line}`;
+  const headline = f.title?.trim();
+  const head = headline
+    ? `${SEVERITY_EMOJI[f.severity]} **[${f.severity} · ${f.type}] ${headline}** \`${where}\``
+    : `${SEVERITY_EMOJI[f.severity]} **[${f.severity} · ${f.type}] \`${where}\`**`;
   return [
-    `${SEVERITY_EMOJI[f.severity]} **[${f.severity} · ${f.type}] \`${where}\`**`,
+    head,
     `**问题根因**：${f.rootCause}`,
     `**为什么低级解法不够**：${f.whyLowEffortInsufficient}`,
     `**架构级方案**：${f.architecturalSolution}`,
@@ -40,12 +49,18 @@ function formatGeneralFinding(f: GeneralFinding): string {
   ].join('\n');
 }
 
-/** Title for the issue that tracks a problem group. */
+/**
+ * Title for the issue that tracks a problem group. Leads with the model's
+ * concise headline so the issue list reads as a list of *problems*, not just
+ * type+file labels: `🐯 [并发] 读路径无同步自增 hits 计数 · memtable.go`. Falls
+ * back to the old type+file form when the (optional) headline is absent.
+ */
 export function formatIssueTitle(group: ProblemGroup): string {
   const first = group.findings[0];
   const type = first ? first.type : '架构';
   const file = first ? first.file : '';
-  return `🐯 BanGD [${type}] ${file}`;
+  const headline = first?.title?.trim();
+  return headline ? `🐯 [${type}] ${headline} · ${baseName(file)}` : `🐯 BanGD [${type}] ${file}`;
 }
 
 /** Body for the issue tracking a problem group (carries the dedup marker). */
@@ -103,7 +118,10 @@ export function formatSummaryComment(
     const list = items
       .map((item) => {
         const first = item.group.findings[0];
-        const label = first ? `[${first.type}] \`${first.file}\`` : item.group.fullKey;
+        const headline = first?.title?.trim();
+        const label = first
+          ? `[${first.type}] ${headline ? `${headline} ` : ''}\`${first.file}\``
+          : item.group.fullKey;
         if (item.url) return `- ${label} → ${item.url}`;
         // Issue creation failed: inline the detail so the analysis isn't lost.
         const detail = item.group.findings.map((f) => formatFinding(f)).join('\n\n');

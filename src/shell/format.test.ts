@@ -15,6 +15,7 @@ const finding = {
   line: 12,
   severity: '阻塞',
   type: '并发',
+  title: '读路径无同步自增 hits 计数',
   rootCause: '所有权模型错误',
   whyLowEffortInsufficient: '加锁会串行化热路径',
   architecturalSolution: '读写分离的双表设计',
@@ -49,9 +50,21 @@ describe('formatIssueBody / formatIssueTitle', () => {
     expect(body).toContain('读写分离的双表设计');
   });
 
-  it('titles the issue with type and file', () => {
-    expect(formatIssueTitle(group)).toContain('并发');
-    expect(formatIssueTitle(group)).toContain('cache/block.go');
+  it('titles the issue with the core-problem headline, type, and file basename', () => {
+    const title = formatIssueTitle(group);
+    expect(title).toContain('并发');
+    expect(title).toContain('读路径无同步自增 hits 计数');
+    expect(title).toContain('block.go');
+  });
+
+  it('falls back to type + full file path when the headline is absent', () => {
+    const noTitle = groupFindings(
+      [{ ...finding, title: undefined }],
+      42,
+    )[0]!;
+    const title = formatIssueTitle(noTitle);
+    expect(title).toContain('并发');
+    expect(title).toContain('cache/block.go');
   });
 });
 
