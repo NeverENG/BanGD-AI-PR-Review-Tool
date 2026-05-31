@@ -138,7 +138,7 @@ function reportMarkdown(results: ConfigResult[], cases: EvalCase[], meta: { date
   L.push('## 方法');
   L.push('');
   L.push(
-    '- **语料**：6 个**真实** BanDB PR（`eval/cases.json`，由 `eval/build-corpus.mjs` 从 GitHub 冻结）。' +
+    `- **语料**：${cases.length} 个**真实** BanDB PR（\`eval/cases.json\`，由 \`eval/build-corpus.mjs\` 从 GitHub 冻结）。` +
       '标签来源：作者明示意图或**维护者在后续修复 PR 中确认**的缺陷——例如 #58 的崩溃一致性与 Stat→Seek 竞态，' +
       '由维护者在修复 PR #63 中确认并修复。',
   );
@@ -227,7 +227,7 @@ function reportMarkdown(results: ConfigResult[], cases: EvalCase[], meta: { date
 
   L.push('## 局限');
   L.push('');
-  L.push('- 语料仅 6 例（召回锚点 2 例 / 3 条 finding），数字方差大，结论是趋势性的而非统计显著。');
+  L.push(`- 语料仅 ${cases.length} 例（召回锚点 2 例 / 3 条 finding），数字方差大，结论是趋势性的而非统计显著。`);
   L.push('- 标签虽锚定真实 PR 与维护者确认，仍含评审判断；匹配按文件+类型，可能与人工判定有出入。');
   L.push('- 仅用 diff 上下文（未喂改动文件全文/周边代码），低估了 BanGD 在完整上下文下的能力。');
   L.push('- 评测模型/端点见报告头部；用便宜的兼容端点冒烟与用 Opus 生产，质量不可直接外推。');
