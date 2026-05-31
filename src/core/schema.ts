@@ -28,6 +28,10 @@ export const FindingSchema = z.object({
   line: z.number().int().nonnegative().nullable(),
   severity: SeveritySchema,
   type: FindingTypeSchema,
+  /** Concise one-line headline of the core problem — used as the issue title.
+   * Optional (cosmetic): a miss falls back to a type+file title rather than
+   * sinking the whole review through a validation failure. */
+  title: z.string().min(1).optional(),
   /** Root cause, not the symptom. */
   rootCause: z.string().min(1),
   /** What a generic reviewer would do, and why that is insufficient. */
@@ -112,6 +116,7 @@ export const reviewResultJsonSchema = {
           line: { type: ['integer', 'null'] },
           severity: { type: 'string', enum: SeveritySchema.options },
           type: { type: 'string', enum: FindingTypeSchema.options },
+          title: { type: 'string' },
           rootCause: { type: 'string' },
           whyLowEffortInsufficient: { type: 'string' },
           architecturalSolution: { type: 'string' },
