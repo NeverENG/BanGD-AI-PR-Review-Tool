@@ -13,7 +13,9 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "smoke": "npm run build && node build/smoke.js"
+    "smoke": "npm run build && node build/smoke.js",
+    "eval:corpus": "node eval/build-corpus.mjs",
+    "eval": "npm run build && node build/eval/run.js"
   },
   "dependencies": {
     "@actions/core": "^1.11.1",

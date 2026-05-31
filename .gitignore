@@ -4,6 +4,10 @@ build/
 .env
 .DS_Store
 
+# Eval API key — never commit. The eval runner reads the key from here when
+# ANTHROPIC_API_KEY is not set in the environment.
+eval/.apikey
+
 # Note: dist/ is intentionally NOT ignored. A JS GitHub Action runs the
 # committed bundled output, so dist/ (produced by `npm run build:action`)
 # must be committed. See CLAUDE.md.
