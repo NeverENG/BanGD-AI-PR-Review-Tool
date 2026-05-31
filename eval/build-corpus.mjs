@@ -82,6 +82,22 @@ const CASES = [
     groundTruth:
       '这是对「向已关闭 channel 发送」竞态的正确修复。expect 0（在并发改动上测精确率，看是否过度报警）。',
   },
+  {
+    id: 'kway-merge-sstable',
+    pr: 73,
+    body: '将 MergeSSTable 改为流式 K 路归并：新增单文件流式迭代器与最小堆归并，value 直接流式落盘，仅累积块索引与 key（供布隆）；写尾复用既有 SSTable 写逻辑以保持字节布局兼容。',
+    expected: { findings: [], generalFindings: [] },
+    groundTruth:
+      '维护者在 #94 中逐条裁决了 BanGD 对本 PR 的三条 finding，结论均为「非代码缺陷」：#75（merge_iterator 内存 / deep-copy）判为「纯属开销」、保持现状；#78（iterator.go 并发）issue 正文自承误报；#74（merge_iterator 并发）「在当前调用序列下不会触发」，仅以文档注释声明非 goroutine-safe、明确不加锁（加锁属过度设计）。即这是一个正确、测试充分的性能重构。expect 0（在复杂且正确的重构上测精确率——看是否过度报警；注意区别于 #58 这类「维护者确认并改了代码」的真缺陷）。',
+  },
+  {
+    id: 'hermetic-test-cleanup',
+    pr: 72,
+    body: '将 storage 测试改用 t.TempDir() 隔离各用例的 WAL 与 SSTable 路径，并把「缺失键返回 (nil,nil)」的断言改为「缺失键返回 error」以对齐实现契约；同时删除误入库的运行时/测试数据文件并补 .gitignore。',
+    expected: { findings: [], generalFindings: [] },
+    groundTruth:
+      '仅改动测试代码（*_test.go）、.gitignore 与删除运行时/测试数据文件，不触及任何数据库引擎生产代码。维护者卫生性 PR（closes #51）。expect 0（真负例 / 在测试与数据清理改动上测精确率）。',
+  },
 ];
 
 const here = dirname(fileURLToPath(import.meta.url));
