@@ -16,12 +16,14 @@
  */
 import { readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { dirname, join, parse } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { review } from '../core/review.js';
-import type { PrContext } from '../core/ports.js';
+import { verifyFindings, verifyGeneralFindings } from '../core/verify.js';
+import type { LlmClient, PrContext } from '../core/ports.js';
+import type { PromptTexts } from '../core/prompt.js';
 import { AnthropicLlmClient } from '../shell/llm.js';
 import { loadPromptTexts } from '../shell/prompts.js';
-import { formatUsage, totalTokens } from '../core/usage.js';
+import { formatUsage, totalTokens, type TokenUsage } from '../core/usage.js';
 import { loadCorpus, type EvalCase } from './corpus.js';
 import {
   scoreFindings,
@@ -38,10 +40,13 @@ interface Config {
   verifyVotes: number;
 }
 
-const CONFIGS: Config[] = [
-  { label: 'baseline（无对抗式复核）', verifyVotes: 0 },
-  { label: '优化后（对抗式复核 3 票/条）', verifyVotes: 3 },
-];
+/** Adversarial refuters per finding in the "optimized" config (DESIGN §六.3). */
+const VERIFY_VOTES = 3;
+const BASELINE_LABEL = 'baseline（无对抗式复核）';
+const OPTIMIZED_LABEL = `优化后（对抗式复核 ${VERIFY_VOTES} 票/条）`;
+
+/** An LLM client that also exposes accumulated token usage (the shell client). */
+export type EvalLlm = LlmClient & { usage: TokenUsage };
 
 function resolveKey(): string {
   const env = process.env['ANTHROPIC_API_KEY'] ?? process.env['DEEPSEEK_API_KEY'];
@@ -78,54 +83,101 @@ interface ConfigResult {
   usageText: string;
 }
 
-async function runConfig(
-  config: Config,
+function scoreCase(
+  c: EvalCase,
+  predFindings: PredictedFinding[],
+  predGeneral: PredictedGeneral[],
+): CaseResult {
+  const findingMetrics = scoreFindings(c.expected.findings, predFindings);
+  const generalFp = scoreGeneral(c.expected.generalFindings, predGeneral).fp;
+  return { case: c, predFindings, predGeneral, findingMetrics, generalFp };
+}
+
+/**
+ * Clean A/B (the key fix vs the first eval). Generate findings ONCE per PR, then
+ * score TWO configs off that single generation: baseline = the raw findings,
+ * optimized = the SAME findings after adversarial verification. The only variable
+ * between configs is verification, so the precision delta can no longer be
+ * confounded by the model's generation randomness — which the old design (two
+ * independent `review()` calls, one per config) could not separate.
+ *
+ * Generation and verification use separate clients so token cost splits cleanly:
+ * baseline pays for generation, optimized pays for the SAME generation plus the
+ * verification overhead. Injecting both clients (rather than constructing them)
+ * keeps this unit testable with fakes.
+ */
+export async function runCleanAB(
   cases: EvalCase[],
-  apiKey: string,
-  baseURL: string | undefined,
-  model: string | undefined,
-): Promise<ConfigResult> {
-  // Fresh client per config → clean per-config token totals.
-  const llm = new AnthropicLlmClient({
-    apiKey,
-    ...(model ? { model } : {}),
-    ...(baseURL ? { baseURL } : {}),
-  });
-  const prompts = await loadPromptTexts();
-  const results: CaseResult[] = [];
+  prompts: PromptTexts,
+  genLlm: EvalLlm,
+  verifyLlm: EvalLlm,
+): Promise<{ baseline: ConfigResult; optimized: ConfigResult }> {
+  const baselineCases: CaseResult[] = [];
+  const optimizedCases: CaseResult[] = [];
 
   for (const c of cases) {
     const pr: PrContext = {
       metadata: { title: c.title, body: c.body, number: null },
       getDiff: () => Promise.resolve(c.diff),
-      readFile: () => Promise.resolve(null), // diff-only context, uniform across configs
+      readFile: () => Promise.resolve(null), // diff-only context, shared by both configs
     };
     try {
-      const { result } = await review({ llm, pr }, prompts, { verifyVotes: config.verifyVotes });
-      const predFindings = result.findings.map((f) => ({ file: f.file, type: f.type }));
-      const predGeneral = result.generalFindings.map((g) => ({ file: g.file, category: g.category }));
-      const findingMetrics = scoreFindings(c.expected.findings, predFindings);
-      const generalFp = scoreGeneral(c.expected.generalFindings, predGeneral).fp;
-      results.push({ case: c, predFindings, predGeneral, findingMetrics, generalFp });
+      // Generate ONCE (verification off) — this single generation feeds both configs.
+      const { result } = await review({ llm: genLlm, pr }, prompts, { verifyVotes: 0 });
+      const base = scoreCase(
+        c,
+        result.findings.map((f) => ({ file: f.file, type: f.type })),
+        result.generalFindings.map((g) => ({ file: g.file, category: g.category })),
+      );
+      baselineCases.push(base);
+
+      // Verify the SAME findings — the single A/B variable.
+      const ctx = { changeSummary: result.changeSummary, diff: c.diff };
+      const [arch, general] = await Promise.all([
+        verifyFindings(verifyLlm, result.findings, ctx, VERIFY_VOTES),
+        verifyGeneralFindings(verifyLlm, result.generalFindings, ctx, VERIFY_VOTES),
+      ]);
+      const opt = scoreCase(
+        c,
+        arch.kept.map((f) => ({ file: f.file, type: f.type })),
+        general.kept.map((g) => ({ file: g.file, category: g.category })),
+      );
+      optimizedCases.push(opt);
+
       console.log(
-        `  [${config.label}] ${c.source}: 架构 finding ${predFindings.length} 条 / 普通 ${predGeneral.length} 条 ` +
-          `(P=${pct(findingMetrics.precision)} R=${pct(findingMetrics.recall)})`,
+        `  ${c.source}: 生成架构 ${base.predFindings.length} / 普通 ${base.predGeneral.length} 条；` +
+          `复核后架构 ${opt.predFindings.length} / 普通 ${opt.predGeneral.length} 条`,
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      const empty = scoreFindings(c.expected.findings, []);
-      results.push({ case: c, predFindings: [], predGeneral: [], findingMetrics: empty, generalFp: 0, error: msg });
-      console.log(`  [${config.label}] ${c.source}: ERROR ${msg}`);
+      const errResult: CaseResult = { ...scoreCase(c, [], []), error: msg };
+      baselineCases.push(errResult);
+      optimizedCases.push(errResult);
+      console.log(`  ${c.source}: ERROR ${msg}`);
     }
   }
 
+  const genTokens = totalTokens(genLlm.usage);
+  const verifyTokens = totalTokens(verifyLlm.usage);
+
   return {
-    config,
-    cases: results,
-    findings: aggregate(results.map((r) => r.findingMetrics)),
-    generalFp: results.reduce((s, r) => s + r.generalFp, 0),
-    tokens: totalTokens(llm.usage),
-    usageText: formatUsage(llm.usage),
+    baseline: {
+      config: { label: BASELINE_LABEL, verifyVotes: 0 },
+      cases: baselineCases,
+      findings: aggregate(baselineCases.map((r) => r.findingMetrics)),
+      generalFp: baselineCases.reduce((s, r) => s + r.generalFp, 0),
+      tokens: genTokens,
+      usageText: formatUsage(genLlm.usage),
+    },
+    optimized: {
+      config: { label: OPTIMIZED_LABEL, verifyVotes: VERIFY_VOTES },
+      cases: optimizedCases,
+      findings: aggregate(optimizedCases.map((r) => r.findingMetrics)),
+      generalFp: optimizedCases.reduce((s, r) => s + r.generalFp, 0),
+      // Generation is shared with baseline; optimized additionally pays for verification.
+      tokens: genTokens + verifyTokens,
+      usageText: `生成 ${formatUsage(genLlm.usage)}；复核 ${formatUsage(verifyLlm.usage)}`,
+    },
   };
 }
 
@@ -151,10 +203,14 @@ function reportMarkdown(results: ConfigResult[], cases: EvalCase[], meta: { date
       '只认结构锚点、不比对措辞，避免被表述方式钻空子。',
   );
   L.push(
-    '- **单变量 A/B**：两次运行只差一个变量——**对抗式复核关 / 开（0 票 vs 3 票）**；' +
-      '模型、提示词（含 few-shot）、上下文全部一致，每个配置用全新客户端以隔离 token 计数。',
+    `- **干净 A/B（生成一次 → 复核关/开）**：每个 PR 只**生成一次** finding，再对**同一批** finding 分别评分——` +
+      `baseline=不复核，优化=对同一批做 ${VERIFY_VOTES} 票对抗式复核。唯一变量就是复核本身，` +
+      '彻底消除了「生成随机性」对精确率结论的混淆（旧设计两次独立生成 finding，无法区分精确率变化来自复核、还是来自这次生成本就多报/少报）。',
   );
-  L.push('- **上下文**：仅 diff（`readFile` 返回 null），两配置一致，保证 A/B 可比。');
+  L.push(
+    '- **token 拆分**：生成与复核用两个客户端，干净归因——baseline=生成开销，优化=生成开销 + 复核开销；' +
+      '二者的**生成部分是同一次调用**，完全可比。上下文两配置一致：仅 diff（`readFile` 返回 null）。',
+  );
   L.push('');
   L.push('## 语料');
   L.push('');
@@ -242,11 +298,15 @@ async function main(): Promise<void> {
   const corpus = await loadCorpus();
   console.log(`语料：${corpus.cases.length} 个真实 PR（${corpus.repo}）`);
 
-  const results: ConfigResult[] = [];
-  for (const config of CONFIGS) {
-    console.log(`\n=== 运行配置：${config.label} ===`);
-    results.push(await runConfig(config, corpus.cases, apiKey, baseURL, model));
-  }
+  // Two fresh clients: one for the single generation, one for verification — so
+  // token cost splits cleanly between the configs (see runCleanAB).
+  const mkClient = (): EvalLlm =>
+    new AnthropicLlmClient({ apiKey, ...(model ? { model } : {}), ...(baseURL ? { baseURL } : {}) });
+  const prompts = await loadPromptTexts();
+
+  console.log('\n=== 生成一次 → 对同一批做 复核关/开（干净 A/B）===');
+  const { baseline, optimized } = await runCleanAB(corpus.cases, prompts, mkClient(), mkClient());
+  const results: ConfigResult[] = [baseline, optimized];
 
   const date = new Date().toISOString().slice(0, 10);
   const md = reportMarkdown(results, corpus.cases, {
@@ -264,7 +324,13 @@ async function main(): Promise<void> {
   console.log(`\n报告已写入 ${out}`);
 }
 
-main().catch((e: unknown) => {
-  console.error(e instanceof Error ? e.message : String(e));
-  process.exit(1);
-});
+// Run only when invoked as the entry (node build/eval/run.js), NOT when imported
+// by a test — importing must not kick off a live eval / exit the process.
+const invokedDirectly =
+  process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (invokedDirectly) {
+  main().catch((e: unknown) => {
+    console.error(e instanceof Error ? e.message : String(e));
+    process.exit(1);
+  });
+}
